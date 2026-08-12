@@ -1,0 +1,630 @@
+// Recruitment E2E — data model
+//
+// Design notes:
+// - A Pipeline is a reusable *template*. A Job points at a pipeline.
+// - When an Application is created, the pipeline's stages are COPIED into
+//   ApplicationStage rows. From then on the application owns its own flow,
+//   so a recruiter can personalize it (add a stage, skip one, reorder) without
+//   mutating the template or other candidates. This is the "standard flow ->
+//   progressive personalization" mechanic.
+// - Everything observed from Google (mail, events, files) lands in its own
+//   table, is linked back to an Application, and is replayed through the
+//   automation engine which may move the application forward.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy & identity
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users           User[]
+  pipelines       Pipeline[]
+  jobs            Job[]
+  candidates      Candidate[]
+  applications    Application[]
+  activities      Activity[]
+  emailMessages   EmailMessage[]
+  calendarEvents  CalendarEvent[]
+  driveFiles      DriveFile[]
+  automationRules AutomationRule[]
+  emailTemplates  EmailTemplate[]
+  syncRuns        SyncRun[]
+}
+
+enum UserRole {
+  ADMIN
+  RECRUITER
+  HIRING_MANAGER
+  INTERVIEWER
+}
+
+model User {
+  id        String   @id @default(cuid())
+  orgId     String
+  email     String   @unique
+  name      String
+  avatarUrl String?
+  role      UserRole @default(RECRUITER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  org           Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  googleAccount GoogleAccount?
+  notes         Note[]
+  ownedJobs     Job[]          @relation("JobOwner")
+  scorecards    Scorecard[]
+
+  @@index([orgId])
+}
+
+/// OAuth tokens + per-provider incremental sync cursors for one user.
+model GoogleAccount {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  email        String
+  accessToken  String
+  refreshToken String?
+  expiresAt    DateTime?
+  scopes       String[] @default([])
+
+  // Incremental sync cursors — each Google API has its own flavour.
+  gmailHistoryId      String?
+  calendarSyncToken   String?
+  driveStartPageToken String?
+
+  syncEnabled  Boolean   @default(true)
+  lastSyncedAt DateTime?
+  lastError    String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline templates
+// ---------------------------------------------------------------------------
+
+/// Semantic meaning of a stage. Automations key off this rather than the name,
+/// so a stage called "Tech Screen" or "Entrevista Técnica" both behave alike.
+enum StageType {
+  SOURCED
+  APPLIED
+  SCREENING
+  ASSESSMENT
+  INTERVIEW
+  REFERENCE_CHECK
+  OFFER
+  HIRED
+  REJECTED
+  CUSTOM
+}
+
+model Pipeline {
+  id          String   @id @default(cuid())
+  orgId       String
+  name        String
+  description String?
+  isDefault   Boolean  @default(false)
+  archived    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  org    Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  stages PipelineStage[]
+  jobs   Job[]
+
+  @@unique([orgId, name])
+  @@index([orgId])
+}
+
+model PipelineStage {
+  id         String    @id @default(cuid())
+  pipelineId String
+  name       String
+  /// Stable machine key, e.g. "tech_interview". Used by automation rules.
+  key        String
+  type       StageType @default(CUSTOM)
+  position   Int
+  /// Target days in this stage before it is flagged as stalled.
+  slaDays    Int?
+  /// Whether recruiters may drop this stage when personalizing an application.
+  optional   Boolean   @default(false)
+  description String?
+
+  pipeline Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+
+  @@unique([pipelineId, key])
+  @@index([pipelineId])
+}
+
+// ---------------------------------------------------------------------------
+// Jobs & candidates
+// ---------------------------------------------------------------------------
+
+enum JobStatus {
+  DRAFT
+  OPEN
+  ON_HOLD
+  CLOSED
+  FILLED
+}
+
+model Job {
+  id             String    @id @default(cuid())
+  orgId          String
+  pipelineId     String
+  ownerId        String?
+  title          String
+  department     String?
+  location       String?
+  employmentType String?
+  description    String?
+  status         JobStatus @default(OPEN)
+  openings       Int       @default(1)
+  /// Google Drive folder holding this job's documents.
+  driveFolderId  String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  org          Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  pipeline     Pipeline      @relation(fields: [pipelineId], references: [id])
+  owner        User?         @relation("JobOwner", fields: [ownerId], references: [id])
+  applications Application[]
+
+  @@index([orgId, status])
+}
+
+model Candidate {
+  id          String   @id @default(cuid())
+  orgId       String
+  fullName    String
+  email       String
+  phone       String?
+  linkedinUrl String?
+  location    String?
+  headline    String?
+  source      String?
+  tags        String[] @default([])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  org          Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  applications Application[]
+  activities   Activity[]
+  emails       EmailMessage[]
+  driveFiles   DriveFile[]
+
+  @@unique([orgId, email])
+  @@index([orgId])
+}
+
+// ---------------------------------------------------------------------------
+// Applications — the unit the whole product revolves around
+// ---------------------------------------------------------------------------
+
+enum ApplicationStatus {
+  ACTIVE
+  ON_HOLD
+  HIRED
+  REJECTED
+  WITHDRAWN
+}
+
+/// How much this application has diverged from its pipeline template.
+enum FlowMode {
+  /// Follows the template exactly.
+  STANDARD
+  /// Stages were added / removed / reordered for this candidate.
+  PERSONALIZED
+}
+
+model Application {
+  id             String            @id @default(cuid())
+  orgId          String
+  jobId          String
+  candidateId    String
+  status         ApplicationStatus @default(ACTIVE)
+  flowMode       FlowMode          @default(STANDARD)
+  currentStageId String?           @unique
+  rating         Int?
+  rejectReason   String?
+  /// Gmail thread that this application's correspondence lives in.
+  emailThreadId  String?
+  driveFolderId  String?
+  appliedAt      DateTime          @default(now())
+  lastActivityAt DateTime          @default(now())
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  org            Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  job            Job                @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  candidate      Candidate          @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  currentStage   ApplicationStage?  @relation("CurrentStage", fields: [currentStageId], references: [id])
+  stages         ApplicationStage[] @relation("ApplicationStages")
+  transitions    StageTransition[]
+  activities     Activity[]
+  notes          Note[]
+  scorecards     Scorecard[]
+  emails         EmailMessage[]
+  calendarEvents CalendarEvent[]
+  driveFiles     DriveFile[]
+
+  @@unique([jobId, candidateId])
+  @@index([orgId, status])
+  @@index([jobId])
+}
+
+enum StageStatus {
+  PENDING
+  ACTIVE
+  COMPLETED
+  SKIPPED
+  FAILED
+}
+
+/// A per-application copy of a pipeline stage. Owning the copy is what makes
+/// personalization safe: edits here never touch the template.
+model ApplicationStage {
+  id            String      @id @default(cuid())
+  applicationId String
+  /// Null when the stage was added ad hoc for this candidate.
+  templateId    String?
+  name          String
+  key           String
+  type          StageType   @default(CUSTOM)
+  position      Int
+  status        StageStatus @default(PENDING)
+  slaDays       Int?
+  notes         String?
+  /// True when this stage does not come from the pipeline template.
+  isCustom      Boolean     @default(false)
+  enteredAt     DateTime?
+  completedAt   DateTime?
+  dueAt         DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  application    Application       @relation("ApplicationStages", fields: [applicationId], references: [id], onDelete: Cascade)
+  currentOf      Application?      @relation("CurrentStage")
+  fromTransitions StageTransition[] @relation("FromStage")
+  toTransitions   StageTransition[] @relation("ToStage")
+  calendarEvents CalendarEvent[]
+  scorecards     Scorecard[]
+
+  @@unique([applicationId, key])
+  @@index([applicationId, position])
+}
+
+/// Who or what caused a change.
+enum ActorType {
+  USER
+  AUTOMATION
+  SYNC
+  SYSTEM
+}
+
+model StageTransition {
+  id            String    @id @default(cuid())
+  applicationId String
+  fromStageId   String?
+  toStageId     String?
+  actorType     ActorType @default(USER)
+  actorId       String?
+  /// Automation rule that fired, when actorType is AUTOMATION.
+  ruleId        String?
+  reason        String?
+  createdAt     DateTime  @default(now())
+
+  application Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  fromStage   ApplicationStage? @relation("FromStage", fields: [fromStageId], references: [id], onDelete: SetNull)
+  toStage     ApplicationStage? @relation("ToStage", fields: [toStageId], references: [id], onDelete: SetNull)
+
+  @@index([applicationId, createdAt])
+}
+
+model Note {
+  id            String   @id @default(cuid())
+  applicationId String
+  authorId      String?
+  body          String
+  createdAt     DateTime @default(now())
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  author      User?       @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([applicationId])
+}
+
+enum ScorecardVerdict {
+  STRONG_YES
+  YES
+  NEUTRAL
+  NO
+  STRONG_NO
+}
+
+model Scorecard {
+  id            String           @id @default(cuid())
+  applicationId String
+  stageId       String?
+  authorId      String?
+  verdict       ScorecardVerdict
+  score         Int?
+  strengths     String?
+  concerns      String?
+  createdAt     DateTime         @default(now())
+
+  application Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  stage       ApplicationStage? @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  author      User?             @relation(fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([applicationId])
+}
+
+// ---------------------------------------------------------------------------
+// Google Workspace mirrors
+// ---------------------------------------------------------------------------
+
+enum EmailDirection {
+  INBOUND
+  OUTBOUND
+}
+
+model EmailMessage {
+  id            String         @id @default(cuid())
+  orgId         String
+  applicationId String?
+  candidateId   String?
+  gmailId       String
+  threadId      String
+  direction     EmailDirection
+  subject       String?
+  snippet       String?
+  bodyText      String?
+  fromEmail     String
+  fromName      String?
+  toEmails      String[]       @default([])
+  ccEmails      String[]       @default([])
+  labels        String[]       @default([])
+  sentAt        DateTime
+  createdAt     DateTime       @default(now())
+
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  application Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  candidate   Candidate?   @relation(fields: [candidateId], references: [id], onDelete: SetNull)
+
+  @@unique([orgId, gmailId])
+  @@index([applicationId, sentAt])
+  @@index([threadId])
+}
+
+enum EventStatus {
+  CONFIRMED
+  TENTATIVE
+  CANCELLED
+}
+
+model CalendarEvent {
+  id             String      @id @default(cuid())
+  orgId          String
+  applicationId  String?
+  stageId        String?
+  googleEventId  String
+  calendarId     String      @default("primary")
+  title          String
+  description    String?
+  location       String?
+  meetLink       String?
+  startsAt       DateTime
+  endsAt         DateTime
+  attendees      String[]    @default([])
+  organizerEmail String?
+  status         EventStatus @default(CONFIRMED)
+  /// Set once the post-event automation has run, so it fires only once.
+  completedHandledAt DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  org         Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  application Application?      @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  stage       ApplicationStage? @relation(fields: [stageId], references: [id], onDelete: SetNull)
+
+  @@unique([orgId, googleEventId])
+  @@index([applicationId, startsAt])
+  @@index([startsAt])
+}
+
+enum DriveFileKind {
+  RESUME
+  COVER_LETTER
+  PORTFOLIO
+  ASSESSMENT
+  OFFER_LETTER
+  NOTES
+  OTHER
+}
+
+model DriveFile {
+  id            String        @id @default(cuid())
+  orgId         String
+  applicationId String?
+  candidateId   String?
+  googleFileId  String
+  name          String
+  mimeType      String
+  kind          DriveFileKind @default(OTHER)
+  webViewLink   String?
+  iconLink      String?
+  sizeBytes     BigInt?
+  modifiedAt    DateTime?
+  createdAt     DateTime      @default(now())
+
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  application Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  candidate   Candidate?   @relation(fields: [candidateId], references: [id], onDelete: SetNull)
+
+  @@unique([orgId, googleFileId])
+  @@index([applicationId])
+}
+
+// ---------------------------------------------------------------------------
+// Automation engine
+// ---------------------------------------------------------------------------
+
+enum RuleTrigger {
+  EMAIL_RECEIVED_FROM_CANDIDATE
+  EMAIL_SENT_TO_CANDIDATE
+  CALENDAR_EVENT_SCHEDULED
+  CALENDAR_EVENT_COMPLETED
+  CALENDAR_EVENT_CANCELLED
+  DRIVE_FILE_ADDED
+  STAGE_SLA_BREACHED
+  APPLICATION_CREATED
+  SCORECARD_SUBMITTED
+}
+
+enum RuleAction {
+  ADVANCE_STAGE
+  SET_STAGE
+  COMPLETE_CURRENT_STAGE
+  SET_APPLICATION_STATUS
+  ATTACH_TO_APPLICATION
+  FLAG_FOR_REVIEW
+  LOG_ACTIVITY
+}
+
+model AutomationRule {
+  id      String      @id @default(cuid())
+  orgId   String
+  name    String
+  description String?
+  enabled Boolean     @default(true)
+  trigger RuleTrigger
+  action  RuleAction
+  /// Evaluation order; lower runs first, first matching rule per trigger wins.
+  priority Int        @default(100)
+
+  /// Optional scoping — a rule may apply only to one pipeline or one job.
+  pipelineId String?
+  jobId      String?
+
+  /// Free-form matchers, e.g. { "titleContains": ["interview"], "stageType": "SCREENING" }
+  conditions Json @default("{}")
+  /// Action parameters, e.g. { "stageKey": "tech_interview" }
+  config     Json @default("{}")
+
+  timesFired Int       @default(0)
+  lastFiredAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, trigger, enabled])
+}
+
+model EmailTemplate {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  subject   String
+  body      String
+  /// Stage this template is suggested for.
+  stageKey  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, name])
+}
+
+// ---------------------------------------------------------------------------
+// Activity feed & sync bookkeeping
+// ---------------------------------------------------------------------------
+
+enum ActivityType {
+  APPLICATION_CREATED
+  STAGE_CHANGED
+  STAGE_COMPLETED
+  EMAIL_RECEIVED
+  EMAIL_SENT
+  INTERVIEW_SCHEDULED
+  INTERVIEW_COMPLETED
+  INTERVIEW_CANCELLED
+  FILE_ATTACHED
+  NOTE_ADDED
+  SCORECARD_ADDED
+  STATUS_CHANGED
+  FLAGGED
+  SYNC
+}
+
+model Activity {
+  id            String       @id @default(cuid())
+  orgId         String
+  applicationId String?
+  candidateId   String?
+  type          ActivityType
+  actorType     ActorType    @default(SYSTEM)
+  actorId       String?
+  title         String
+  body          String?
+  /// Provenance: gmail message id, calendar event id, drive file id...
+  externalId    String?
+  meta          Json         @default("{}")
+  occurredAt    DateTime     @default(now())
+  createdAt     DateTime     @default(now())
+
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  application Application? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  candidate   Candidate?   @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, occurredAt])
+  @@index([applicationId, occurredAt])
+}
+
+enum SyncProvider {
+  GMAIL
+  CALENDAR
+  DRIVE
+}
+
+enum SyncStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+}
+
+model SyncRun {
+  id             String       @id @default(cuid())
+  orgId          String
+  userId         String?
+  provider       SyncProvider
+  status         SyncStatus   @default(RUNNING)
+  itemsSeen      Int          @default(0)
+  itemsLinked    Int          @default(0)
+  rulesFired     Int          @default(0)
+  error          String?
+  startedAt      DateTime     @default(now())
+  finishedAt     DateTime?
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, provider, startedAt])
+}
