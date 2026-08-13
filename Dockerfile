@@ -13,6 +13,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 # --- dependencies -----------------------------------------------------------
 FROM base AS deps
+# devDependencies are needed at build time (next, prisma, tsx). Playwright is
+# among them for the smoke test, so stop its postinstall from pulling ~400MB of
+# browsers into an image that never runs them.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 COPY package.json package-lock.json ./
 COPY prisma ./prisma
 RUN npm ci
