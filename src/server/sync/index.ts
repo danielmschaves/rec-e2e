@@ -2,7 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { syncGmail } from "@/server/sync/gmail";
 import { syncCalendar, processCompletedEvents } from "@/server/sync/calendar";
 import { syncDrive } from "@/server/sync/drive";
-import { checkStageSlas } from "@/server/automation";
+import { checkQuietStages } from "@/server/automation";
 import type { SyncProvider } from "@prisma/client";
 
 export type ProviderResult = {
@@ -10,38 +10,36 @@ export type ProviderResult = {
   seen: number;
   linked: number;
   rulesFired: number;
+  /** New processes created from application confirmations. */
+  detected: number;
   error?: string;
 };
 
 /**
- * Runs all three Google syncs for one connected account.
+ * Runs all three Google syncs for the connected account.
  *
  * Each provider is isolated: a Gmail failure must not stop Calendar from
  * syncing, so failures are captured per provider rather than thrown.
  */
 export async function syncAccount(userId: string): Promise<ProviderResult[]> {
-  const account = await prisma.googleAccount.findUnique({
-    where: { userId },
-    include: { user: { select: { orgId: true } } },
-  });
-  if (!account) throw new Error("No Google account connected for this user");
+  const account = await prisma.googleAccount.findUnique({ where: { userId } });
+  if (!account) throw new Error("No Google account connected");
   if (!account.syncEnabled) return [];
 
-  const orgId = account.user.orgId;
   const results: ProviderResult[] = [];
 
   const providers: Array<{
     provider: SyncProvider;
-    run: () => Promise<{ seen: number; linked: number; rulesFired: number }>;
+    run: () => Promise<{ seen: number; linked: number; rulesFired: number; detected: number }>;
   }> = [
-    { provider: "GMAIL", run: () => syncGmail(account, orgId) },
-    { provider: "CALENDAR", run: () => syncCalendar(account, orgId) },
-    { provider: "DRIVE", run: () => syncDrive(account, orgId) },
+    { provider: "GMAIL", run: () => syncGmail(account, userId) },
+    { provider: "CALENDAR", run: () => syncCalendar(account, userId) },
+    { provider: "DRIVE", run: () => syncDrive(account, userId) },
   ];
 
   for (const { provider, run } of providers) {
     const runRecord = await prisma.syncRun.create({
-      data: { orgId, userId, provider, status: "RUNNING" },
+      data: { userId, provider, status: "RUNNING" },
     });
 
     try {
@@ -67,18 +65,18 @@ export async function syncAccount(userId: string): Promise<ProviderResult[]> {
         where: { id: account.id },
         data: { lastError: message.slice(0, 500) },
       });
-      results.push({ provider, seen: 0, linked: 0, rulesFired: 0, error: message });
+      results.push({ provider, seen: 0, linked: 0, rulesFired: 0, detected: 0, error: message });
     }
   }
 
   // Time-based triggers that do not depend on a Google call.
-  await processCompletedEvents(orgId);
-  await checkStageSlas(orgId);
+  await processCompletedEvents(userId);
+  await checkQuietStages(userId);
 
   return results;
 }
 
-/** Syncs every connected account across every org. Used by the scheduler. */
+/** Syncs every connected account. Used by the scheduler. */
 export async function syncAllAccounts(): Promise<{
   accounts: number;
   results: ProviderResult[];
@@ -97,11 +95,11 @@ export async function syncAllAccounts(): Promise<{
     }
   }
 
-  // Orgs with no Google connection still need SLA and post-interview sweeps.
-  const orgs = await prisma.organization.findMany({ select: { id: true } });
-  for (const org of orgs) {
-    await processCompletedEvents(org.id);
-    await checkStageSlas(org.id);
+  // Users without a Google connection still need the quiet-stage sweep.
+  const users = await prisma.user.findMany({ select: { id: true } });
+  for (const user of users) {
+    await processCompletedEvents(user.id);
+    await checkQuietStages(user.id);
   }
 
   return { accounts: accounts.length, results };

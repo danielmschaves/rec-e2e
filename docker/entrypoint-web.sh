@@ -6,9 +6,9 @@ set -e
 echo "[web] generating Prisma client…"
 npx prisma generate >/dev/null
 
-echo "[web] applying schema (retrying until the database accepts it)…"
+echo "[web] applying migrations (retrying until the database accepts them)…"
 attempt=1
-until npx prisma db push --skip-generate --accept-data-loss; do
+until npx prisma migrate deploy; do
   if [ "$attempt" -ge 30 ]; then
     echo "[web] database never became ready — giving up" >&2
     exit 1

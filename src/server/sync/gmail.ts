@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { clientForAccount, gmailFor, parseAddress, parseAddressList } from "@/lib/google";
-import { matchWithJobHint } from "@/server/sync/match";
+import { matchByEmails } from "@/server/sync/match";
+import { detectApplication, createFromDetection } from "@/server/sync/detect";
 import { dispatchEvent } from "@/server/automation";
 import { logActivity } from "@/server/activity";
 import type { GoogleAccount } from "@prisma/client";
@@ -10,6 +11,8 @@ export type SyncResult = {
   seen: number;
   linked: number;
   rulesFired: number;
+  /** New processes created from application confirmations. */
+  detected: number;
   error?: string;
 };
 
@@ -42,27 +45,28 @@ function extractPlainText(payload: gmail_v1.Schema$MessagePart | undefined): str
 }
 
 function header(message: gmail_v1.Schema$Message, name: string): string | undefined {
-  return message.payload?.headers?.find(
-    (h) => h.name?.toLowerCase() === name.toLowerCase(),
-  )?.value ?? undefined;
+  return (
+    message.payload?.headers?.find((h) => h.name?.toLowerCase() === name.toLowerCase())
+      ?.value ?? undefined
+  );
 }
 
 /**
- * Pulls new Gmail messages for one connected account, links them to candidates
- * and lets the automation engine react.
+ * Pulls new mail from your inbox, links anything from a company you're in a
+ * process with, and lets the automation engine react.
  *
  * Uses the history API when we have a cursor (cheap, incremental) and falls
  * back to a bounded message list for the very first sync.
  */
 export async function syncGmail(
   account: GoogleAccount,
-  orgId: string,
+  userId: string,
   options: { backfillDays?: number; maxMessages?: number } = {},
 ): Promise<SyncResult> {
   const backfillDays = options.backfillDays ?? 30;
   const maxMessages = options.maxMessages ?? 100;
 
-  const result: SyncResult = { seen: 0, linked: 0, rulesFired: 0 };
+  const result: SyncResult = { seen: 0, linked: 0, rulesFired: 0, detected: 0 };
 
   const auth = await clientForAccount(account);
   const gmail = gmailFor(auth);
@@ -86,8 +90,7 @@ export async function syncGmail(
     } catch (err: unknown) {
       // A 404 means the cursor aged out (Gmail keeps ~1 week of history).
       // Drop it and fall through to a bounded list.
-      const status = (err as { code?: number })?.code;
-      if (status !== 404) throw err;
+      if ((err as { code?: number })?.code !== 404) throw err;
       usedHistory = false;
     }
   }
@@ -109,7 +112,7 @@ export async function syncGmail(
     result.seen++;
 
     const existing = await prisma.emailMessage.findUnique({
-      where: { orgId_gmailId: { orgId, gmailId: id } },
+      where: { userId_gmailId: { userId, gmailId: id } },
     });
     if (existing) continue;
 
@@ -133,26 +136,54 @@ export async function syncGmail(
     const accountEmail = account.email.toLowerCase();
     const direction = from.email === accountEmail ? "OUTBOUND" : "INBOUND";
 
-    // The candidate is whoever is on the other end of the conversation.
-    const counterparts =
-      direction === "OUTBOUND" ? [...to, ...cc] : [from.email, ...cc];
+    // The company is whoever is on the other end of the conversation.
+    const counterparts = direction === "OUTBOUND" ? [...to, ...cc] : [from.email, ...cc];
 
     const bodyText = extractPlainText(message.payload);
-    const match = await matchWithJobHint(
-      orgId,
+    const match = await matchByEmails(
+      userId,
       counterparts,
       [subject, bodyText?.slice(0, 2000)].filter(Boolean).join("\n"),
     );
 
-    // Unmatched mail is ordinary inbox traffic — skip it rather than storing
-    // the recruiter's entire mailbox.
-    if (!match) continue;
+    let opportunity = match?.opportunity ?? null;
+    let detectedNew = false;
+
+    // Nothing matched. Before discarding, check whether this is a confirmation
+    // that you applied somewhere new — that is how a process gets tracked
+    // without you typing anything.
+    if (!opportunity && direction === "INBOUND") {
+      const detected = await detectApplication({
+        fromEmail: from.email,
+        fromName: from.name,
+        subject,
+        body: bodyText,
+      });
+
+      if (detected) {
+        const created = await createFromDetection({
+          userId,
+          detected,
+          gmailId: id,
+          receivedAt: sentAt,
+          senderEmail: from.email,
+        });
+        if (created) {
+          opportunity = created;
+          detectedNew = true;
+          result.detected++;
+        }
+      }
+    }
+
+    // Still nothing — ordinary inbox traffic. Skip it rather than copying your
+    // whole mailbox into the tracker.
+    if (!opportunity) continue;
 
     await prisma.emailMessage.create({
       data: {
-        orgId,
-        applicationId: match.application?.id ?? null,
-        candidateId: match.candidate.id,
+        userId,
+        opportunityId: opportunity.id,
         gmailId: id,
         threadId: message.threadId ?? id,
         direction,
@@ -169,47 +200,48 @@ export async function syncGmail(
     });
     result.linked++;
 
-    // Keep the application pinned to the thread so replies group cleanly.
-    if (match.application && !match.application.emailThreadId && message.threadId) {
-      await prisma.application.update({
-        where: { id: match.application.id },
+    // Keep the opportunity pinned to the thread so replies group cleanly.
+    if (!opportunity.emailThreadId && message.threadId) {
+      await prisma.opportunity.update({
+        where: { id: opportunity.id },
         data: { emailThreadId: message.threadId },
       });
     }
 
     await logActivity({
-      orgId,
-      applicationId: match.application?.id ?? null,
-      candidateId: match.candidate.id,
+      userId,
+      opportunityId: opportunity.id,
       type: direction === "INBOUND" ? "EMAIL_RECEIVED" : "EMAIL_SENT",
       title:
         direction === "INBOUND"
-          ? `Email from ${match.candidate.fullName}: ${subject ?? "(no subject)"}`
-          : `Email sent to ${match.candidate.fullName}: ${subject ?? "(no subject)"}`,
+          ? `Email from ${from.name ?? from.email}: ${subject ?? "(no subject)"}`
+          : `You emailed ${to[0] ?? "them"}: ${subject ?? "(no subject)"}`,
       body: message.snippet ?? null,
       actorType: "SYNC",
       externalId: id,
       occurredAt: sentAt,
+      meta: { matchedVia: match?.via ?? "detected" },
     });
 
-    if (match.application) {
-      const outcomes = await dispatchEvent({
-        orgId,
-        applicationId: match.application.id,
-        trigger:
-          direction === "INBOUND"
-            ? "EMAIL_RECEIVED_FROM_CANDIDATE"
-            : "EMAIL_SENT_TO_CANDIDATE",
-        payload: {
-          title: subject,
-          body: bodyText,
-          fromEmail: from.email,
-          externalId: id,
-          occurredAt: sentAt,
-        },
-      });
-      result.rulesFired += outcomes.filter((o) => o.applied).length;
-    }
+    // The confirmation that created a process must not also be treated as
+    // "they replied" — that would complete the Applied stage the instant it
+    // was entered.
+    if (detectedNew) continue;
+
+    const outcomes = await dispatchEvent({
+      userId,
+      opportunityId: opportunity.id,
+      trigger:
+        direction === "INBOUND" ? "EMAIL_RECEIVED_FROM_COMPANY" : "EMAIL_SENT_TO_COMPANY",
+      payload: {
+        title: subject,
+        body: bodyText,
+        fromEmail: from.email,
+        externalId: id,
+        occurredAt: sentAt,
+      },
+    });
+    result.rulesFired += outcomes.filter((o) => o.applied).length;
   }
 
   // Advance the cursor to wherever the mailbox is now.
@@ -232,29 +264,34 @@ export async function syncGmail(
   return result;
 }
 
-/** Sends a message as the connected user and mirrors it into the timeline. */
-export async function sendEmail(params: {
+/**
+ * Sends an approved draft.
+ *
+ * This is only ever called from an explicit user action — the assistant writes
+ * drafts, it never reaches this function.
+ */
+export async function sendDraft(params: {
   account: GoogleAccount;
-  orgId: string;
-  to: string;
-  subject: string;
-  body: string;
-  threadId?: string | null;
-  applicationId?: string | null;
-  candidateId?: string | null;
-  actorId?: string | null;
+  userId: string;
+  draftId: string;
 }): Promise<string> {
+  const draft = await prisma.emailDraft.findFirst({
+    where: { id: params.draftId, userId: params.userId },
+  });
+  if (!draft) throw new Error("Draft not found");
+  if (draft.status !== "DRAFT") throw new Error("That draft was already handled");
+
   const auth = await clientForAccount(params.account);
   const gmail = gmailFor(auth);
 
   const mime = [
     `From: ${params.account.email}`,
-    `To: ${params.to}`,
-    `Subject: ${params.subject}`,
+    `To: ${draft.toEmail}`,
+    `Subject: ${draft.subject}`,
     "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="UTF-8"',
     "",
-    params.body,
+    draft.body,
   ].join("\r\n");
 
   const raw = Buffer.from(mime)
@@ -265,26 +302,30 @@ export async function sendEmail(params: {
 
   const res = await gmail.users.messages.send({
     userId: "me",
-    requestBody: { raw, threadId: params.threadId ?? undefined },
+    requestBody: { raw, threadId: draft.threadId ?? undefined },
   });
 
   const messageId = res.data.id ?? "";
 
+  await prisma.emailDraft.update({
+    where: { id: draft.id },
+    data: { status: "SENT", sentAt: new Date(), gmailId: messageId || null },
+  });
+
   if (messageId) {
     await prisma.emailMessage.upsert({
-      where: { orgId_gmailId: { orgId: params.orgId, gmailId: messageId } },
+      where: { userId_gmailId: { userId: params.userId, gmailId: messageId } },
       create: {
-        orgId: params.orgId,
-        applicationId: params.applicationId ?? null,
-        candidateId: params.candidateId ?? null,
+        userId: params.userId,
+        opportunityId: draft.opportunityId,
         gmailId: messageId,
         threadId: res.data.threadId ?? messageId,
         direction: "OUTBOUND",
-        subject: params.subject,
-        snippet: params.body.slice(0, 200),
-        bodyText: params.body,
+        subject: draft.subject,
+        snippet: draft.body.slice(0, 200),
+        bodyText: draft.body,
         fromEmail: params.account.email,
-        toEmails: [params.to],
+        toEmails: [draft.toEmail],
         sentAt: new Date(),
       },
       update: {},
@@ -292,25 +333,23 @@ export async function sendEmail(params: {
   }
 
   await logActivity({
-    orgId: params.orgId,
-    applicationId: params.applicationId ?? null,
-    candidateId: params.candidateId ?? null,
+    userId: params.userId,
+    opportunityId: draft.opportunityId,
     type: "EMAIL_SENT",
-    title: `Email sent: ${params.subject}`,
-    body: params.body.slice(0, 500),
+    title: `Sent: ${draft.subject}`,
+    body: draft.body.slice(0, 500),
     actorType: "USER",
-    actorId: params.actorId ?? null,
     externalId: messageId,
   });
 
-  if (params.applicationId) {
+  if (draft.opportunityId) {
     await dispatchEvent({
-      orgId: params.orgId,
-      applicationId: params.applicationId,
-      trigger: "EMAIL_SENT_TO_CANDIDATE",
+      userId: params.userId,
+      opportunityId: draft.opportunityId,
+      trigger: "EMAIL_SENT_TO_COMPANY",
       payload: {
-        title: params.subject,
-        body: params.body,
+        title: draft.subject,
+        body: draft.body,
         fromEmail: params.account.email,
         externalId: messageId,
       },

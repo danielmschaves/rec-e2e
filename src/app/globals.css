@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens. One restrained palette: slate for structure, indigo for
+ * action, and a small set of semantic colours for stage status. Stage status
+ * is the most-read signal in the whole product, so those colours are defined
+ * once here and reused everywhere.
+ */
+@theme {
+  --color-canvas: oklch(0.985 0.002 250);
+  --color-surface: oklch(1 0 0);
+  --color-line: oklch(0.922 0.004 250);
+  --color-ink: oklch(0.21 0.02 265);
+  --color-ink-soft: oklch(0.53 0.02 265);
+  --color-brand: oklch(0.53 0.19 268);
+  --color-brand-soft: oklch(0.96 0.02 268);
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04";
+}
+
+/* Thin scrollbars inside the pipeline board, which scrolls horizontally. */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
+}
+.scroll-thin::-webkit-scrollbar {
+  height: 8px;
+  width: 8px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background-color: var(--color-line);
+  border-radius: 999px;
+}
+
+@keyframes fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-in-soft {
+  animation: fade-rise 0.24s ease-out both;
+}

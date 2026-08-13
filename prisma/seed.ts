@@ -1,402 +1,517 @@
 /**
- * Idempotent demo seed.
+ * Idempotent demo seed — a job search in progress.
  *
  * Safe to run on every boot: everything is keyed on a natural unique field and
  * upserted, so re-running never duplicates or clobbers live edits.
  */
 import { PrismaClient, type StageType } from "@prisma/client";
-import { createApplication, moveToStage, addCustomStage, skipStage } from "../src/server/applications";
+import {
+  createOpportunity,
+  moveToStage,
+  addCustomStage,
+  skipStage,
+  setNextAction,
+} from "../src/server/opportunities";
 
 const prisma = new PrismaClient();
 
-const ORG_SLUG = "northwind-talent";
-const DEMO_EMAIL = "recruiter@northwind.test";
+const DEMO_EMAIL = "you@example.com";
 
-type StageSpec = {
-  name: string;
-  key: string;
-  type: StageType;
-  slaDays?: number;
-  optional?: boolean;
-};
+type StageSpec = { name: string; key: string; type: StageType; chaseAfterDays?: number };
 
-const ENGINEERING_FLOW: StageSpec[] = [
-  { name: "Applied", key: "applied", type: "APPLIED", slaDays: 2 },
-  { name: "Resume Screen", key: "resume_screen", type: "SCREENING", slaDays: 3 },
-  { name: "Recruiter Call", key: "recruiter_call", type: "SCREENING", slaDays: 5 },
-  { name: "Take-home Assessment", key: "assessment", type: "ASSESSMENT", slaDays: 7, optional: true },
-  { name: "Technical Interview", key: "tech_interview", type: "INTERVIEW", slaDays: 7 },
-  { name: "Hiring Manager Interview", key: "hm_interview", type: "INTERVIEW", slaDays: 5 },
-  { name: "Reference Check", key: "reference_check", type: "REFERENCE_CHECK", slaDays: 4, optional: true },
-  { name: "Offer", key: "offer", type: "OFFER", slaDays: 5 },
-  { name: "Hired", key: "hired", type: "HIRED" },
+const STANDARD_FLOW: StageSpec[] = [
+  { name: "Researching", key: "researching", type: "RESEARCHING", chaseAfterDays: 7 },
+  { name: "Applied", key: "applied", type: "APPLIED", chaseAfterDays: 10 },
+  { name: "Recruiter Screen", key: "recruiter_screen", type: "RECRUITER_SCREEN", chaseAfterDays: 5 },
+  { name: "Take-home", key: "take_home", type: "TAKE_HOME", chaseAfterDays: 7 },
+  { name: "Technical Interview", key: "tech_interview", type: "TECHNICAL_INTERVIEW", chaseAfterDays: 7 },
+  { name: "System Design", key: "system_design", type: "SYSTEM_DESIGN", chaseAfterDays: 7 },
+  { name: "Final / Values", key: "final_interview", type: "BEHAVIOURAL_INTERVIEW", chaseAfterDays: 5 },
+  { name: "Offer", key: "offer", type: "OFFER", chaseAfterDays: 5 },
+  { name: "Accepted", key: "accepted", type: "ACCEPTED" },
 ];
 
-const FAST_TRACK_FLOW: StageSpec[] = [
-  { name: "Sourced", key: "sourced", type: "SOURCED", slaDays: 2 },
-  { name: "Intro Call", key: "intro_call", type: "SCREENING", slaDays: 3 },
-  { name: "Panel Interview", key: "panel", type: "INTERVIEW", slaDays: 5 },
-  { name: "Offer", key: "offer", type: "OFFER", slaDays: 3 },
-  { name: "Hired", key: "hired", type: "HIRED" },
+const STARTUP_FLOW: StageSpec[] = [
+  { name: "Intro Call", key: "intro_call", type: "RECRUITER_SCREEN", chaseAfterDays: 5 },
+  { name: "Founder Chat", key: "founder_chat", type: "BEHAVIOURAL_INTERVIEW", chaseAfterDays: 5 },
+  { name: "Paid Trial / Work Sample", key: "work_sample", type: "TAKE_HOME", chaseAfterDays: 7 },
+  { name: "Team Interview", key: "team_interview", type: "ONSITE", chaseAfterDays: 5 },
+  { name: "Offer", key: "offer", type: "OFFER", chaseAfterDays: 3 },
+  { name: "Accepted", key: "accepted", type: "ACCEPTED" },
 ];
 
-const DESIGN_FLOW: StageSpec[] = [
-  { name: "Applied", key: "applied", type: "APPLIED", slaDays: 2 },
-  { name: "Portfolio Review", key: "portfolio_review", type: "SCREENING", slaDays: 4 },
-  { name: "Design Exercise", key: "design_exercise", type: "ASSESSMENT", slaDays: 7 },
-  { name: "Team Interview", key: "team_interview", type: "INTERVIEW", slaDays: 5 },
-  { name: "Offer", key: "offer", type: "OFFER", slaDays: 5 },
-  { name: "Hired", key: "hired", type: "HIRED" },
+const AGENCY_FLOW: StageSpec[] = [
+  { name: "Recruiter Intro", key: "recruiter_intro", type: "RECRUITER_SCREEN", chaseAfterDays: 4 },
+  { name: "CV Submitted to Client", key: "cv_submitted", type: "APPLIED", chaseAfterDays: 7 },
+  { name: "Client Interview", key: "client_interview", type: "TECHNICAL_INTERVIEW", chaseAfterDays: 7 },
+  { name: "Offer", key: "offer", type: "OFFER", chaseAfterDays: 3 },
+  { name: "Accepted", key: "accepted", type: "ACCEPTED" },
 ];
 
-async function upsertPipeline(
-  orgId: string,
+async function upsertTemplate(
+  userId: string,
   name: string,
   description: string,
   stages: StageSpec[],
   isDefault = false,
 ) {
-  const pipeline = await prisma.pipeline.upsert({
-    where: { orgId_name: { orgId, name } },
-    create: { orgId, name, description, isDefault },
+  const template = await prisma.processTemplate.upsert({
+    where: { userId_name: { userId, name } },
+    create: { userId, name, description, isDefault },
     update: { description },
   });
 
   for (const [index, stage] of stages.entries()) {
-    await prisma.pipelineStage.upsert({
-      where: { pipelineId_key: { pipelineId: pipeline.id, key: stage.key } },
+    await prisma.templateStage.upsert({
+      where: { templateId_key: { templateId: template.id, key: stage.key } },
       create: {
-        pipelineId: pipeline.id,
+        templateId: template.id,
         name: stage.name,
         key: stage.key,
         type: stage.type,
         position: index,
-        slaDays: stage.slaDays ?? null,
-        optional: stage.optional ?? false,
+        chaseAfterDays: stage.chaseAfterDays ?? null,
       },
       update: { name: stage.name, position: index, type: stage.type },
     });
   }
 
-  return pipeline;
+  return template;
 }
 
 async function main() {
   console.log("[seed] starting…");
 
-  const org = await prisma.organization.upsert({
-    where: { slug: ORG_SLUG },
-    create: { slug: ORG_SLUG, name: "Northwind Talent" },
-    update: {},
-  });
-
-  const recruiter = await prisma.user.upsert({
+  const user = await prisma.user.upsert({
     where: { email: DEMO_EMAIL },
     create: {
-      orgId: org.id,
       email: DEMO_EMAIL,
-      name: "Alex Rivera",
-      role: "ADMIN",
+      name: "Daniel Schaves",
+      headline: "Senior backend engineer · Go, Python, Postgres",
+      profile:
+        "Senior backend engineer with 9 years' experience, mostly Go and Python on data-heavy systems. Looking for a senior or staff role, remote-first or hybrid in Lisbon. Targeting €85–110k. I care most about working on hard data problems with people who write tests. Not interested in pure management yet.",
+      timezone: "Europe/Lisbon",
     },
     update: {},
   });
 
-  const hiringManager = await prisma.user.upsert({
-    where: { email: "manager@northwind.test" },
-    create: {
-      orgId: org.id,
-      email: "manager@northwind.test",
-      name: "Priya Nair",
-      role: "HIRING_MANAGER",
-    },
-    update: {},
-  });
-
-  // --- pipelines ------------------------------------------------------------
-  const engineering = await upsertPipeline(
-    org.id,
-    "Standard Engineering Hire",
-    "Nine-step flow used for most engineering roles.",
-    ENGINEERING_FLOW,
+  // --- templates ------------------------------------------------------------
+  const standard = await upsertTemplate(
+    user.id,
+    "Standard engineering loop",
+    "The nine-step process most mid-size companies run.",
+    STANDARD_FLOW,
     true,
   );
-  const fastTrack = await upsertPipeline(
-    org.id,
-    "Fast-track Senior",
-    "Compressed flow for senior referrals and executive search.",
-    FAST_TRACK_FLOW,
+  const startup = await upsertTemplate(
+    user.id,
+    "Startup / founder-led",
+    "Compressed flow for early-stage companies.",
+    STARTUP_FLOW,
   );
-  const design = await upsertPipeline(
-    org.id,
-    "Design Hire",
-    "Portfolio-led flow for design roles.",
-    DESIGN_FLOW,
+  await upsertTemplate(
+    user.id,
+    "Via agency recruiter",
+    "When an external recruiter is running the process.",
+    AGENCY_FLOW,
   );
 
-  // --- jobs -----------------------------------------------------------------
-  const jobSpecs = [
-    {
-      title: "Senior Backend Engineer",
-      pipelineId: engineering.id,
-      department: "Engineering",
-      location: "Remote (EU)",
-      employmentType: "Full-time",
-      openings: 2,
-      description: "Own the core services behind our billing platform.",
-    },
-    {
-      title: "Product Designer",
-      pipelineId: design.id,
-      department: "Design",
-      location: "Lisbon",
-      employmentType: "Full-time",
-      openings: 1,
-      description: "Shape the end-to-end experience of our recruiter tooling.",
-    },
-    {
-      title: "Staff Data Engineer",
-      pipelineId: fastTrack.id,
-      department: "Data",
-      location: "Remote (Global)",
-      employmentType: "Full-time",
-      openings: 1,
-      description: "Senior referral pipeline — compressed process.",
-    },
+  // --- companies ------------------------------------------------------------
+  const companySpecs = [
+    { name: "Nimbus Data", domains: ["nimbusdata.com"], website: "https://nimbusdata.com", notes: "Series B, data infrastructure. Strong engineering blog." },
+    { name: "Vela Health", domains: ["velahealth.io"], website: "https://velahealth.io", notes: "Health-tech scale-up, Lisbon office." },
+    { name: "Orbital", domains: ["orbital.dev"], website: "https://orbital.dev", notes: "Seed stage, 12 people, founder-led process." },
+    { name: "Kestrel Bank", domains: ["kestrelbank.com"], website: "https://kestrelbank.com", notes: "Slow process, big comp." },
+    { name: "Northwind Analytics", domains: ["northwind-analytics.com"], website: null, notes: "Found via agency recruiter." },
   ];
 
-  const jobs = [];
-  for (const spec of jobSpecs) {
-    const existing = await prisma.job.findFirst({
-      where: { orgId: org.id, title: spec.title },
+  const companies: Record<string, string> = {};
+  for (const spec of companySpecs) {
+    const company = await prisma.company.upsert({
+      where: { userId_name: { userId: user.id, name: spec.name } },
+      create: { ...spec, userId: user.id },
+      update: { domains: spec.domains },
     });
-    const job = existing
-      ? await prisma.job.update({ where: { id: existing.id }, data: { ...spec } })
-      : await prisma.job.create({
-          data: { ...spec, orgId: org.id, ownerId: recruiter.id, status: "OPEN" },
-        });
-    jobs.push(job);
+    companies[spec.name] = company.id;
   }
-  const [backendJob, designJob, dataJob] = jobs;
 
-  // --- candidates -----------------------------------------------------------
-  const candidateSpecs = [
-    { fullName: "Marina Duarte", email: "marina.duarte@example.com", headline: "Backend engineer, 8 yrs", source: "Referral", location: "Porto" },
-    { fullName: "Tomás Almeida", email: "tomas.almeida@example.com", headline: "Go / Postgres specialist", source: "LinkedIn", location: "Lisbon" },
-    { fullName: "Sofia Reis", email: "sofia.reis@example.com", headline: "Platform engineer", source: "Careers page", location: "Remote" },
-    { fullName: "Daniel Okafor", email: "daniel.okafor@example.com", headline: "Distributed systems", source: "Referral", location: "Berlin" },
-    { fullName: "Elena Kowalski", email: "elena.kowalski@example.com", headline: "Product designer, fintech", source: "Dribbble", location: "Warsaw" },
-    { fullName: "Rui Ferreira", email: "rui.ferreira@example.com", headline: "Senior product designer", source: "Careers page", location: "Lisbon" },
-    { fullName: "Aisha Rahman", email: "aisha.rahman@example.com", headline: "Staff data engineer", source: "Referral", location: "London" },
-    { fullName: "Lucas Moreira", email: "lucas.moreira@example.com", headline: "Analytics engineer", source: "LinkedIn", location: "São Paulo" },
+  // --- contacts -------------------------------------------------------------
+  const contactSpecs = [
+    { name: "Sara Lindqvist", email: "sara.lindqvist@nimbusdata.com", company: "Nimbus Data", role: "RECRUITER" as const, title: "Technical Recruiter" },
+    { name: "Tom Beckett", email: "tom@nimbusdata.com", company: "Nimbus Data", role: "HIRING_MANAGER" as const, title: "Director of Engineering" },
+    { name: "Inês Carvalho", email: "ines.carvalho@velahealth.io", company: "Vela Health", role: "RECRUITER" as const, title: "Talent Partner" },
+    { name: "Maya Osei", email: "maya@orbital.dev", company: "Orbital", role: "HIRING_MANAGER" as const, title: "Co-founder & CTO" },
+    { name: "Peter Novak", email: "p.novak@kestrelbank.com", company: "Kestrel Bank", role: "RECRUITER" as const, title: "Talent Acquisition" },
   ];
 
-  const candidates = [];
-  for (const spec of candidateSpecs) {
-    candidates.push(
-      await prisma.candidate.upsert({
-        where: { orgId_email: { orgId: org.id, email: spec.email } },
-        create: { ...spec, orgId: org.id },
-        update: {},
-      }),
-    );
+  for (const spec of contactSpecs) {
+    await prisma.contact.upsert({
+      where: { userId_email: { userId: user.id, email: spec.email } },
+      create: {
+        userId: user.id,
+        companyId: companies[spec.company],
+        name: spec.name,
+        email: spec.email,
+        role: spec.role,
+        title: spec.title,
+      },
+      update: {},
+    });
   }
 
-  // --- applications ---------------------------------------------------------
-  // Each one is walked to a different point in its flow so the board has depth.
+  // --- opportunities --------------------------------------------------------
   const plan: Array<{
-    candidateIndex: number;
-    jobId: string;
+    company: string;
+    role: string;
+    templateId: string;
     advanceTo?: string;
     personalize?: "add" | "skip";
+    priority?: "DREAM" | "HIGH" | "MEDIUM" | "LOW";
+    nextAction?: string;
+    details?: Record<string, unknown>;
   }> = [
-    { candidateIndex: 0, jobId: backendJob.id, advanceTo: "tech_interview" },
-    { candidateIndex: 1, jobId: backendJob.id, advanceTo: "recruiter_call" },
-    { candidateIndex: 2, jobId: backendJob.id, advanceTo: "resume_screen" },
-    { candidateIndex: 3, jobId: backendJob.id, advanceTo: "offer", personalize: "skip" },
-    { candidateIndex: 4, jobId: designJob.id, advanceTo: "design_exercise" },
-    { candidateIndex: 5, jobId: designJob.id, advanceTo: "portfolio_review", personalize: "add" },
-    { candidateIndex: 6, jobId: dataJob.id, advanceTo: "panel" },
-    { candidateIndex: 7, jobId: dataJob.id, advanceTo: "intro_call" },
+    {
+      company: "Nimbus Data",
+      role: "Senior Backend Engineer",
+      templateId: standard.id,
+      advanceTo: "take_home",
+      priority: "DREAM",
+      nextAction: "Finish the take-home and submit",
+      details: { location: "Remote (EU)", workMode: "REMOTE", salaryMin: 90000, salaryMax: 115000, source: "Careers page", excitement: 5 },
+    },
+    {
+      company: "Vela Health",
+      role: "Staff Engineer, Platform",
+      templateId: standard.id,
+      advanceTo: "tech_interview",
+      personalize: "skip",
+      priority: "HIGH",
+      nextAction: "Send availability for the technical round",
+      details: { location: "Lisbon", workMode: "HYBRID", salaryMin: 85000, salaryMax: 105000, source: "Referral", excitement: 4 },
+    },
+    {
+      company: "Orbital",
+      role: "Founding Backend Engineer",
+      templateId: startup.id,
+      advanceTo: "founder_chat",
+      personalize: "add",
+      priority: "MEDIUM",
+      details: { location: "Remote (Global)", workMode: "REMOTE", salaryMin: 75000, salaryMax: 95000, source: "LinkedIn", excitement: 3 },
+    },
+    {
+      company: "Kestrel Bank",
+      role: "Senior Software Engineer",
+      templateId: standard.id,
+      advanceTo: "recruiter_screen",
+      priority: "LOW",
+      details: { location: "Lisbon", workMode: "ONSITE", salaryMin: 95000, salaryMax: 120000, source: "Cold application", excitement: 2 },
+    },
+    {
+      company: "Northwind Analytics",
+      role: "Backend Engineer",
+      templateId: standard.id,
+      advanceTo: "applied",
+      priority: "LOW",
+      details: { location: "Remote (EU)", workMode: "REMOTE", source: "Agency recruiter", excitement: 2 },
+    },
   ];
 
+  const created: Record<string, string> = {};
   for (const item of plan) {
-    const candidate = candidates[item.candidateIndex];
-    const existing = await prisma.application.findUnique({
-      where: { jobId_candidateId: { jobId: item.jobId, candidateId: candidate.id } },
+    const existing = await prisma.opportunity.findUnique({
+      where: {
+        userId_companyId_roleTitle: {
+          userId: user.id,
+          companyId: companies[item.company],
+          roleTitle: item.role,
+        },
+      },
     });
-    if (existing) continue;
+    if (existing) {
+      created[item.company] = existing.id;
+      continue;
+    }
 
-    const application = await createApplication({
-      orgId: org.id,
-      jobId: item.jobId,
-      candidateId: candidate.id,
-      actor: { type: "USER", id: recruiter.id },
+    const opportunity = await createOpportunity({
+      userId: user.id,
+      companyId: companies[item.company],
+      templateId: item.templateId,
+      roleTitle: item.role,
+      actor: { type: "USER" },
+      details: {
+        priority: item.priority ?? "MEDIUM",
+        ...(item.details as object),
+      },
     });
+    created[item.company] = opportunity.id;
 
-    // Show off personalization on a couple of applications.
     if (item.personalize === "add") {
       await addCustomStage({
-        applicationId: application.id,
-        name: "Founder Chat",
-        type: "INTERVIEW",
-        slaDays: 3,
-        actor: { type: "USER", id: recruiter.id },
+        opportunityId: opportunity.id,
+        name: "Pairing session with the team",
+        type: "TECHNICAL_INTERVIEW",
+        chaseAfterDays: 4,
+        actor: { type: "USER" },
       });
     }
     if (item.personalize === "skip") {
-      const skippable = await prisma.applicationStage.findFirst({
-        where: { applicationId: application.id, key: "assessment" },
+      const skippable = await prisma.opportunityStage.findFirst({
+        where: { opportunityId: opportunity.id, key: "take_home" },
       });
       if (skippable) {
         await skipStage({
-          applicationId: application.id,
+          opportunityId: opportunity.id,
           stageId: skippable.id,
-          actor: { type: "USER", id: recruiter.id },
-          reason: "Strong referral — assessment waived by hiring manager.",
+          actor: { type: "USER" },
+          reason: "They waived it — the referral covered it.",
         });
       }
     }
 
     if (item.advanceTo) {
       await moveToStage({
-        applicationId: application.id,
+        opportunityId: opportunity.id,
         target: { stageKey: item.advanceTo },
-        actor: { type: "USER", id: recruiter.id },
+        actor: { type: "USER" },
         reason: "Seeded progress",
+      });
+    }
+
+    if (item.nextAction) {
+      await setNextAction({
+        opportunityId: opportunity.id,
+        action: item.nextAction,
+        actor: { type: "USER" },
+      });
+    }
+  }
+
+  // --- one process the inbox scanner picked up on its own -------------------
+  // Shows the "we found this, is it right?" path without needing a live inbox.
+  const detectedName = "Halcyon Systems";
+  const detectedCompany = await prisma.company.upsert({
+    where: { userId_name: { userId: user.id, name: detectedName } },
+    // No domain: the confirmation came via LinkedIn, and linkedin.com is a
+    // relay — writing it here would match every future LinkedIn mail to them.
+    create: { userId: user.id, name: detectedName, domains: [] },
+    update: {},
+  });
+
+  const alreadyDetected = await prisma.opportunity.findUnique({
+    where: {
+      userId_companyId_roleTitle: {
+        userId: user.id,
+        companyId: detectedCompany.id,
+        roleTitle: "Senior Platform Engineer",
+      },
+    },
+  });
+
+  if (!alreadyDetected) {
+    const opportunity = await createOpportunity({
+      userId: user.id,
+      companyId: detectedCompany.id,
+      templateId: standard.id,
+      roleTitle: "Senior Platform Engineer",
+      actor: { type: "SYNC" },
+      details: { source: "LinkedIn", priority: "MEDIUM" },
+    });
+
+    await prisma.opportunity.update({
+      where: { id: opportunity.id },
+      data: {
+        autoDetected: true,
+        detectedFrom: "LinkedIn",
+        detectionEmailId: "seed-linkedin-confirmation",
+      },
+    });
+
+    await moveToStage({
+      opportunityId: opportunity.id,
+      target: { stageKey: "applied" },
+      actor: { type: "SYNC" },
+      reason: "Application confirmed by LinkedIn",
+    });
+  }
+
+  // --- a technical challenge in flight --------------------------------------
+  const nimbus = created["Nimbus Data"];
+  if (nimbus) {
+    const existing = await prisma.challenge.findFirst({
+      where: { opportunityId: nimbus, title: "Event ingestion service" },
+    });
+    if (!existing) {
+      const stage = await prisma.opportunityStage.findFirst({
+        where: { opportunityId: nimbus, key: "take_home" },
+      });
+      const deadline = new Date();
+      deadline.setDate(deadline.getDate() + 4);
+
+      const challenge = await prisma.challenge.create({
+        data: {
+          userId: user.id,
+          opportunityId: nimbus,
+          stageId: stage?.id ?? null,
+          title: "Event ingestion service",
+          briefSource: "Emailed by Sara, 2 days ago",
+          status: "IN_PROGRESS",
+          deadline,
+          estimatedHours: 6,
+          brief: `Build a small service that ingests a stream of JSON events over HTTP and makes them queryable.
+
+Requirements:
+- Accept POST /events with a JSON body. Events have an id, a type, a timestamp and an arbitrary payload object.
+- Events may arrive out of order and may be delivered more than once. Duplicates must not be counted twice.
+- Expose GET /events/stats returning, per event type, the count and the timestamp of the most recent event.
+- Persist to a real datastore — in-memory is not sufficient.
+- The service should handle a sustained 500 events/second on a laptop.
+- Include tests. We care more about what you chose to test than about coverage.
+- A short README explaining your design decisions and what you would do with more time.
+
+Optional, if you have time: a /events/replay endpoint, and basic auth on the write path.
+
+Please spend no more than 4–6 hours. Send us a link to a repository when you're done.`,
+          plan: `1. Sketch the schema first — an events table with a unique constraint on (id) is what makes redelivery safe. Do this before any HTTP code.
+2. POST /events → validate, INSERT ... ON CONFLICT DO NOTHING. That single line is the dedupe story; call it out in the README.
+3. GET /events/stats → a grouped query. Add an index on (type, timestamp desc) and show the EXPLAIN in the README.
+4. Tests: out-of-order delivery, duplicate delivery, and the stats aggregation. These are the three things the brief actually cares about.
+5. Load check: a short script hitting 500/s, with the number you actually measured in the README.
+6. README last, but budget 45 minutes for it — it is graded.
+
+Cut line if time runs short: skip /events/replay and auth, and say so explicitly in the README under "what I'd do next". Shipping the core clean beats half-finishing the extras.`,
+        },
+      });
+
+      const requirements = [
+        { text: "POST /events accepts id, type, timestamp, payload", mustHave: true },
+        { text: "Duplicate deliveries are not double-counted", mustHave: true },
+        { text: "Out-of-order arrival handled correctly", mustHave: true },
+        { text: "GET /events/stats returns count + latest timestamp per type", mustHave: true },
+        { text: "Persists to a real datastore, not in-memory", mustHave: true },
+        { text: "Sustains 500 events/second locally", mustHave: true },
+        { text: "Tests covering the behaviours that matter", mustHave: true },
+        { text: "README explaining design decisions and next steps", mustHave: true },
+        { text: "/events/replay endpoint", mustHave: false },
+        { text: "Basic auth on the write path", mustHave: false },
+      ];
+
+      await prisma.challengeRequirement.createMany({
+        data: requirements.map((r, index) => ({
+          challengeId: challenge.id,
+          text: r.text,
+          mustHave: r.mustHave,
+          position: index,
+          done: index < 4,
+        })),
       });
     }
   }
 
   // --- automation rules -----------------------------------------------------
-  // These are the defaults that make Google sync actually move the process.
   const rules = [
     {
-      name: "Candidate replied → mark screening done",
+      name: "They replied → mark the screen done",
       description:
-        "An inbound reply while in a screening stage means the candidate is engaged; complete the stage.",
-      trigger: "EMAIL_RECEIVED_FROM_CANDIDATE" as const,
+        "An inbound reply while waiting on a screening stage means the ball moved; complete the stage.",
+      trigger: "EMAIL_RECEIVED_FROM_COMPANY" as const,
       action: "COMPLETE_CURRENT_STAGE" as const,
-      priority: 20,
-      conditions: { currentStageType: ["APPLIED", "SCREENING"] },
+      priority: 30,
+      conditions: { currentStageType: ["APPLIED", "RECRUITER_SCREEN"] },
       config: {},
     },
     {
-      name: "Interview booked → move to Technical Interview",
+      name: "Rejection email → close the process",
       description:
-        "A calendar event whose title mentions a technical interview moves the application to that stage.",
+        "Mail that reads like a rejection closes the process so it stops showing as live.",
+      trigger: "EMAIL_RECEIVED_FROM_COMPANY" as const,
+      action: "SET_OPPORTUNITY_STATUS" as const,
+      priority: 10,
+      conditions: {
+        bodyContains: [
+          "not moving forward",
+          "decided not to proceed",
+          "unfortunately",
+          "other candidates",
+          "will not be progressing",
+        ],
+      },
+      config: { status: "REJECTED" },
+    },
+    {
+      name: "Offer email → mark as offer",
+      description: "Mail mentioning an offer flips the process to OFFER so it rises to the top.",
+      trigger: "EMAIL_RECEIVED_FROM_COMPANY" as const,
+      action: "SET_OPPORTUNITY_STATUS" as const,
+      priority: 5,
+      conditions: { bodyContains: ["pleased to offer", "offer letter", "we'd like to offer"] },
+      config: { status: "OFFER" },
+    },
+    {
+      name: "Interview booked → move to that stage",
+      description: "A calendar invite naming a technical interview moves you to that stage.",
       trigger: "CALENDAR_EVENT_SCHEDULED" as const,
       action: "SET_STAGE" as const,
       priority: 10,
-      conditions: { titleContains: ["technical interview", "tech interview", "tech screen"] },
+      conditions: { titleContains: ["technical", "tech screen", "coding"] },
       config: { stageKey: "tech_interview" },
     },
     {
-      name: "Any interview booked → move to interview stage",
-      description: "Fallback for events that mention an interview without naming which one.",
+      name: "Any interview booked → note it",
+      description: "Fallback for invites that don't say which round they are.",
       trigger: "CALENDAR_EVENT_SCHEDULED" as const,
-      action: "SET_STAGE" as const,
+      action: "SET_NEXT_ACTION" as const,
       priority: 50,
-      conditions: { titleContains: ["interview", "entrevista"] },
-      config: { stageType: "INTERVIEW" },
+      conditions: { titleContains: ["interview", "call", "chat", "entrevista"] },
+      config: { nextAction: "Prepare for the scheduled interview" },
     },
     {
       name: "Interview finished → advance",
-      description: "Once the meeting has ended, move the candidate to the next step.",
+      description: "Once the meeting has ended, move to the next step in the process.",
       trigger: "CALENDAR_EVENT_COMPLETED" as const,
       action: "ADVANCE_STAGE" as const,
       priority: 10,
-      conditions: { currentStageType: ["INTERVIEW", "SCREENING", "ASSESSMENT"] },
+      conditions: {},
       config: {},
     },
     {
       name: "Interview cancelled → flag",
-      description: "Cancellations need a human decision, so raise a flag rather than moving.",
+      description: "Cancellations need a human read, so raise a flag rather than moving.",
       trigger: "CALENDAR_EVENT_CANCELLED" as const,
       action: "FLAG_FOR_REVIEW" as const,
       priority: 10,
       conditions: {},
-      config: { message: "Interview was cancelled — reschedule or reconsider." },
+      config: { message: "An interview was cancelled — chase them for a new slot." },
     },
     {
-      name: "Assessment submitted → complete assessment stage",
-      description: "A document dropped in while on an assessment stage closes that stage.",
-      trigger: "DRIVE_FILE_ADDED" as const,
-      action: "COMPLETE_CURRENT_STAGE" as const,
-      priority: 20,
-      conditions: { currentStageType: ["ASSESSMENT"] },
-      config: {},
-    },
-    {
-      name: "Stalled application → flag for review",
-      description: "Anything past its stage SLA gets surfaced to the recruiter.",
-      trigger: "STAGE_SLA_BREACHED" as const,
-      action: "FLAG_FOR_REVIEW" as const,
+      name: "Gone quiet → suggest a nudge",
+      description: "Anything past its chase window gets a next action so it doesn't rot.",
+      trigger: "STAGE_WENT_QUIET" as const,
+      action: "SET_NEXT_ACTION" as const,
       priority: 10,
       conditions: {},
-      config: { message: "This application is past its stage target." },
+      config: { nextAction: "Send a follow-up — this has gone quiet" },
     },
   ];
 
   for (const rule of rules) {
-    const existing = await prisma.automationRule.findFirst({
-      where: { orgId: org.id, name: rule.name },
-    });
-    if (existing) continue;
-    await prisma.automationRule.create({ data: { ...rule, orgId: org.id } });
-  }
-
-  // --- email templates ------------------------------------------------------
-  const templates = [
-    {
-      name: "Screening invite",
-      stageKey: "recruiter_call",
-      subject: "Chat about the {{job}} role at {{company}}?",
-      body:
-        "Hi {{candidate}},\n\nThanks for applying to {{job}}. I'd love to set up a 30-minute call to walk through your background and what we're building.\n\nAre you free sometime this week?\n\nBest,\n{{recruiter}}",
-    },
-    {
-      name: "Technical interview confirmation",
-      stageKey: "tech_interview",
-      subject: "Your technical interview for {{job}}",
-      body:
-        "Hi {{candidate}},\n\nYour technical interview is confirmed. You'll meet two engineers for 60 minutes and work through a practical problem — no trick questions.\n\nSee you then,\n{{recruiter}}",
-    },
-    {
-      name: "Offer",
-      stageKey: "offer",
-      subject: "Offer — {{job}} at {{company}}",
-      body:
-        "Hi {{candidate}},\n\nWe'd like to offer you the {{job}} role. The full details are attached; I'm happy to walk through anything.\n\nCongratulations,\n{{recruiter}}",
-    },
-    {
-      name: "Rejection after interview",
-      stageKey: null,
-      subject: "Update on your {{job}} application",
-      body:
-        "Hi {{candidate}},\n\nThank you for the time you put into our process. We've decided to move forward with other candidates for {{job}}, but we were glad to meet you and would welcome an application in future.\n\nBest,\n{{recruiter}}",
-    },
-  ];
-
-  for (const template of templates) {
-    await prisma.emailTemplate.upsert({
-      where: { orgId_name: { orgId: org.id, name: template.name } },
-      create: { ...template, orgId: org.id },
-      update: {},
+    await prisma.automationRule.upsert({
+      where: { userId_name: { userId: user.id, name: rule.name } },
+      create: { ...rule, userId: user.id },
+      update: { description: rule.description },
     });
   }
 
   const counts = {
-    pipelines: await prisma.pipeline.count({ where: { orgId: org.id } }),
-    jobs: await prisma.job.count({ where: { orgId: org.id } }),
-    candidates: await prisma.candidate.count({ where: { orgId: org.id } }),
-    applications: await prisma.application.count({ where: { orgId: org.id } }),
-    rules: await prisma.automationRule.count({ where: { orgId: org.id } }),
+    templates: await prisma.processTemplate.count({ where: { userId: user.id } }),
+    companies: await prisma.company.count({ where: { userId: user.id } }),
+    contacts: await prisma.contact.count({ where: { userId: user.id } }),
+    opportunities: await prisma.opportunity.count({ where: { userId: user.id } }),
+    challenges: await prisma.challenge.count({ where: { userId: user.id } }),
+    rules: await prisma.automationRule.count({ where: { userId: user.id } }),
   };
 
   console.log("[seed] done:", counts);
-  console.log(`[seed] sign in as ${recruiter.email} (dev login) — org ${org.name}`);
-  void hiringManager;
-  void design;
+  console.log(`[seed] sign in as ${user.email} (dev login)`);
 }
 
 main()

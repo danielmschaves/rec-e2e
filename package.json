@@ -1,14 +1,20 @@
 {
-  "name": "rec-e2e",
+  "name": "job-search-companion",
   "version": "0.1.0",
   "private": true,
-  "description": "End-to-end recruitment process platform with Google Workspace sync",
+  "description": "Track every recruitment process you are going through as a candidate, with an assistant that has read the thread.",
   "scripts": {
     "dev": "next dev -H 0.0.0.0 -p 3000",
     "build": "prisma generate && next build",
     "start": "next start -H 0.0.0.0 -p 3000",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npx tsx scripts/e2e-check.ts && npx tsx scripts/assistant-check.ts && npx tsx scripts/detection-check.ts",
+    "check:e2e": "tsx scripts/e2e-check.ts",
+    "check:assistant": "tsx scripts/assistant-check.ts",
+    "check:detection": "tsx scripts/detection-check.ts",
+    "check:smoke": "node scripts/smoke.mjs",
+    "inspect": "tsx scripts/inspect.ts",
     "worker": "tsx watch worker/index.ts",
     "worker:prod": "tsx worker/index.ts",
     "prisma:generate": "prisma generate",
@@ -23,6 +29,7 @@
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.116.0",
     "@prisma/client": "^6.2.1",
     "bullmq": "^5.34.6",
     "clsx": "^2.1.1",
@@ -41,6 +48,7 @@
     "@types/node": "^22.10.5",
     "@types/react": "^19.0.7",
     "@types/react-dom": "^19.0.3",
+    "playwright": "^1.62.1",
     "postcss": "^8.5.1",
     "prisma": "^6.2.1",
     "tailwindcss": "^4.0.0",

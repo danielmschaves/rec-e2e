@@ -1,81 +1,97 @@
 import { prisma } from "@/lib/prisma";
-import type { Application, Candidate } from "@prisma/client";
+import type { Opportunity } from "@prisma/client";
 
 export type Match = {
-  candidate: Candidate;
-  application: Application | null;
+  companyId: string;
+  opportunity: Opportunity | null;
+  /** How we recognised them — shown in the timeline so matches are auditable. */
+  via: "contact" | "domain";
 };
 
 /**
- * Resolves an incoming Google artifact to a candidate.
+ * Resolves an incoming Google artifact to a company you're in a process with.
  *
- * Email address is the join key across all three Google surfaces — it is the
- * one identifier that appears in a Gmail header, a Calendar attendee list and
- * a Drive sharing record alike.
+ * Two signals, in order of confidence:
+ *   1. A known Contact's exact address (recruiter@acme.com).
+ *   2. The company's registered email domain — so a hiring manager who has
+ *      never emailed you before still lands on the right process.
  */
 export async function matchByEmails(
-  orgId: string,
+  userId: string,
   emails: string[],
+  hintText?: string | null,
 ): Promise<Match | null> {
-  const normalised = [...new Set(emails.map((e) => e.toLowerCase().trim()).filter(Boolean))];
+  const normalised = [
+    ...new Set(emails.map((e) => e.toLowerCase().trim()).filter(Boolean)),
+  ];
   if (normalised.length === 0) return null;
 
-  const candidate = await prisma.candidate.findFirst({
-    where: { orgId, email: { in: normalised, mode: "insensitive" } },
+  const contact = await prisma.contact.findFirst({
+    where: { userId, email: { in: normalised, mode: "insensitive" }, companyId: { not: null } },
   });
-  if (!candidate) return null;
-
-  const application = await pickApplication(candidate.id);
-  return { candidate, application };
-}
-
-/**
- * A candidate may be in flight for several roles. Prefer the active one with
- * the most recent activity — that is nearly always the thread being discussed.
- */
-export async function pickApplication(
-  candidateId: string,
-  jobHint?: string | null,
-): Promise<Application | null> {
-  if (jobHint) {
-    const byJob = await prisma.application.findFirst({
-      where: { candidateId, jobId: jobHint },
-    });
-    if (byJob) return byJob;
+  if (contact?.companyId) {
+    return {
+      companyId: contact.companyId,
+      opportunity: await pickOpportunity(userId, contact.companyId, hintText),
+      via: "contact",
+    };
   }
 
-  const active = await prisma.application.findFirst({
-    where: { candidateId, status: "ACTIVE" },
-    orderBy: { lastActivityAt: "desc" },
-  });
-  if (active) return active;
+  const domains = [
+    ...new Set(normalised.map((e) => e.split("@")[1]).filter(Boolean)),
+  ];
+  if (domains.length === 0) return null;
 
-  return prisma.application.findFirst({
-    where: { candidateId },
-    orderBy: { lastActivityAt: "desc" },
+  // Skip the big consumer mail hosts — a gmail.com sender tells us nothing.
+  const generic = new Set([
+    "gmail.com",
+    "googlemail.com",
+    "outlook.com",
+    "hotmail.com",
+    "yahoo.com",
+    "icloud.com",
+    "proton.me",
+    "protonmail.com",
+  ]);
+  const meaningful = domains.filter((d) => !generic.has(d));
+  if (meaningful.length === 0) return null;
+
+  const company = await prisma.company.findFirst({
+    where: { userId, domains: { hasSome: meaningful } },
   });
+  if (!company) return null;
+
+  return {
+    companyId: company.id,
+    opportunity: await pickOpportunity(userId, company.id, hintText),
+    via: "domain",
+  };
 }
 
 /**
- * Narrows to one application when a text blob (email subject, event title)
- * mentions a job title. Useful when a candidate is in two pipelines at once.
+ * A company may be running you through two roles at once. Prefer the open one
+ * with the most recent activity, and let a role title in the text override.
  */
-export async function matchWithJobHint(
-  orgId: string,
-  emails: string[],
-  text: string | null | undefined,
-): Promise<Match | null> {
-  const match = await matchByEmails(orgId, emails);
-  if (!match || !text) return match;
-
-  const applications = await prisma.application.findMany({
-    where: { candidateId: match.candidate.id },
-    include: { job: { select: { id: true, title: true } } },
+export async function pickOpportunity(
+  userId: string,
+  companyId: string,
+  hintText?: string | null,
+): Promise<Opportunity | null> {
+  const open = await prisma.opportunity.findMany({
+    where: { userId, companyId, status: { in: ["ACTIVE", "ON_HOLD", "OFFER"] } },
     orderBy: { lastActivityAt: "desc" },
   });
-  if (applications.length < 2) return match;
 
-  const lower = text.toLowerCase();
-  const hinted = applications.find((a) => lower.includes(a.job.title.toLowerCase()));
-  return hinted ? { candidate: match.candidate, application: hinted } : match;
+  const pool = open.length > 0
+    ? open
+    : await prisma.opportunity.findMany({
+        where: { userId, companyId },
+        orderBy: { lastActivityAt: "desc" },
+      });
+
+  if (pool.length === 0) return null;
+  if (pool.length === 1 || !hintText) return pool[0];
+
+  const lower = hintText.toLowerCase();
+  return pool.find((o) => lower.includes(o.roleTitle.toLowerCase())) ?? pool[0];
 }

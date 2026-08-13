@@ -7,6 +7,7 @@
  *   2. Keep a repeatable job running so syncing happens without user action —
  *      this is what makes application status update "by itself".
  */
+import "./env";
 import { Worker, Queue, type Job } from "bullmq";
 import IORedis from "ioredis";
 import { syncAccount, syncAllAccounts } from "../src/server/sync/index";
