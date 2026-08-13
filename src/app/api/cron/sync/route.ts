@@ -14,7 +14,7 @@ export const maxDuration = 60;
  *
  * Protected by CRON_SECRET: Vercel Cron sends it as a bearer token. When the
  * variable is unset the route refuses to run rather than defaulting to open,
- * since it is an unauthenticated path that touches every org's data.
+ * since it is an unauthenticated path that syncs every user's account.
  */
 export async function GET(request: NextRequest) {
   const secret = process.env.CRON_SECRET;

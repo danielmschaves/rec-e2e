@@ -12,6 +12,15 @@ search is seeded: 5 companies, a take-home in flight, and 8 automation rules.
 
 ---
 
+## Documentation
+
+| | |
+| --- | --- |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | How it works and why — the stage engine, sync, detection, the assistant |
+| [OPERATIONS.md](docs/OPERATIONS.md) | Every environment variable, deploy runbook, troubleshooting table |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Setup, conventions, how to verify a change |
+| [SECURITY.md](SECURITY.md) | What secrets it holds, load-bearing design decisions, known gaps |
+
 ## The idea in one paragraph
 
 You are the constant; the companies are the many. A **Flow** is your expectation
@@ -147,13 +156,15 @@ anywhere real — it bypasses authentication by design.
 ## Verifying it works
 
 ```bash
-npx tsx scripts/e2e-check.ts        # 31 assertions: engine, automations, tools
-npx tsx scripts/assistant-check.ts  # 23 assertions: the agent loop, no API key needed
-npx tsx scripts/detection-check.ts  # 27 assertions: real ATS emails → tracked process
-node scripts/smoke.mjs              # drives the UI in a real browser, screenshots
-npx tsx scripts/inspect.ts          # prints every process and its stage flow
-curl localhost:3000/api/health      # database + redis liveness
+npm run check              # typecheck + all three suites — 81 assertions, no API key needed
+npm run check:smoke        # drives the UI in a real browser, with screenshots
+npm run inspect            # prints every process and its stage flow
+curl localhost:3000/api/health
 ```
+
+Individually: `check:e2e` (31 assertions — engine, automations, tools),
+`check:assistant` (23 — the agent loop), `check:detection` (27 — real ATS
+emails → tracked process).
 
 `e2e-check` creates a throwaway company, walks it through the lifecycle —
 standard flow, personalisation, each automation trigger, the assistant's tools —
@@ -181,7 +192,7 @@ src/server/ai/             client, tools, the agent loop
 src/server/sync/           gmail.ts, calendar.ts, drive.ts, match.ts, detect.ts
 src/app/                   Next.js App Router pages and server actions
 worker/                    BullMQ consumer + repeatable sync schedule
-scripts/                   e2e-check, assistant-check, smoke, inspect
+scripts/                   e2e-check, assistant-check, detection-check, smoke, inspect
 ```
 
 How matching, the rule engine and the assistant work — and what is deliberately
