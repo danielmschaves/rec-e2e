@@ -1,11 +1,24 @@
 import { redirect } from "next/navigation";
-import { Mail, Calendar, HardDrive, RefreshCw, CheckCircle2, XCircle } from "lucide-react";
+import {
+  Mail,
+  Calendar,
+  HardDrive,
+  RefreshCw,
+  CheckCircle2,
+  XCircle,
+  Sparkles,
+} from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { googleConfigured } from "@/lib/env";
+import { assistantConfigured, ASSISTANT_MODEL } from "@/server/ai/client";
 import { Shell, PageHeader } from "@/components/Shell";
-import { syncNowAction, toggleSyncAction } from "@/app/actions";
-import { relativeTime } from "@/lib/ui";
+import {
+  syncNowAction,
+  toggleSyncAction,
+  updateProfileAction,
+} from "@/app/actions";
+import { relativeTime, inputClass } from "@/lib/ui";
 
 export const dynamic = "force-dynamic";
 
@@ -13,20 +26,20 @@ const SURFACES = [
   {
     icon: Mail,
     name: "Gmail",
-    what: "Reads mail involving your candidates and files it on their timeline.",
-    effect: "A reply while screening closes that stage.",
+    what: "Reads mail from companies you're in a process with and files it on their timeline.",
+    effect: "A reply while you're waiting closes that stage.",
   },
   {
     icon: Calendar,
     name: "Calendar",
-    what: "Watches events whose attendees include a candidate.",
-    effect: "Booking an interview moves the stage; finishing one advances it.",
+    what: "Watches invites whose attendees match a company you're tracking.",
+    effect: "An invite moves the stage; the interview ending advances it.",
   },
   {
     icon: HardDrive,
     name: "Drive",
-    what: "Picks up documents in candidate folders or named after them.",
-    effect: "An assessment upload completes the assessment stage.",
+    what: "Picks up documents named after a company you're talking to.",
+    effect: "Briefs and solutions land on the right process.",
   },
 ];
 
@@ -34,22 +47,23 @@ export default async function IntegrationsPage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  const [account, recentRuns] = await Promise.all([
+  const [account, recentRuns, draftCount] = await Promise.all([
     prisma.googleAccount.findUnique({ where: { userId: user.id } }),
     prisma.syncRun.findMany({
-      where: { orgId: user.orgId },
+      where: { userId: user.id },
       orderBy: { startedAt: "desc" },
       take: 12,
     }),
+    prisma.emailDraft.count({ where: { userId: user.id, status: "DRAFT" } }),
   ]);
 
   const connected = Boolean(account);
 
   return (
-    <Shell user={user} active="/integrations">
+    <Shell user={user} active="/integrations" badges={{ "/drafts": draftCount }}>
       <PageHeader
-        title="Integrations"
-        subtitle="Connect Google Workspace so the process updates itself."
+        title="Setup"
+        subtitle="Connect Google so the tracker updates itself, and tell the assistant who you are."
         actions={
           connected ? (
             <form action={syncNowAction}>
@@ -76,9 +90,7 @@ export default async function IntegrationsPage() {
                   ) : (
                     <XCircle className="h-4 w-4 text-slate-400" strokeWidth={2} />
                   )}
-                  <h2 className="text-sm font-semibold text-slate-900">
-                    Google Workspace
-                  </h2>
+                  <h2 className="text-sm font-semibold text-slate-900">Google Workspace</h2>
                 </div>
                 <p className="mt-1 text-sm text-slate-500">
                   {connected
@@ -123,9 +135,8 @@ export default async function IntegrationsPage() {
             {!googleConfigured() && (
               <p className="mt-4 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
                 Set <code className="font-mono">GOOGLE_CLIENT_ID</code> and{" "}
-                <code className="font-mono">GOOGLE_CLIENT_SECRET</code> in your
-                environment, then restart. Everything else in the app works
-                without them.
+                <code className="font-mono">GOOGLE_CLIENT_SECRET</code>, then restart.
+                Everything else in the app works without them.
               </p>
             )}
           </section>
@@ -142,15 +153,62 @@ export default async function IntegrationsPage() {
                   <h3 className="mt-2.5 text-sm font-semibold text-slate-900">
                     {surface.name}
                   </h3>
-                  <p className="mt-1 text-xs leading-relaxed text-slate-500">
-                    {surface.what}
-                  </p>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-500">{surface.what}</p>
                   <p className="mt-2 border-t border-slate-100 pt-2 text-xs text-slate-600">
                     {surface.effect}
                   </p>
                 </div>
               );
             })}
+          </section>
+
+          <section className="rounded-xl border border-slate-200 bg-white p-5">
+            <div className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-indigo-600" strokeWidth={2} />
+              <h2 className="text-sm font-semibold text-slate-900">Assistant</h2>
+              {assistantConfigured() ? (
+                <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
+                  ready · {ASSISTANT_MODEL}
+                </span>
+              ) : (
+                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+                  needs ANTHROPIC_API_KEY
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-sm text-slate-500">
+              What you tell it here shapes every draft it writes for you.
+            </p>
+
+            <form action={updateProfileAction} className="mt-4 space-y-3">
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600">Headline</span>
+                <input
+                  name="headline"
+                  defaultValue={user.headline ?? ""}
+                  placeholder="Senior backend engineer · Go, Python"
+                  className={inputClass}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600">
+                  Your situation
+                </span>
+                <textarea
+                  name="profile"
+                  rows={6}
+                  defaultValue={user.profile ?? ""}
+                  placeholder="Seniority, stack, what you're looking for, salary expectations, what you'd turn down."
+                  className={inputClass}
+                />
+              </label>
+              <button
+                type="submit"
+                className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
+              >
+                Save
+              </button>
+            </form>
           </section>
         </div>
 
@@ -159,9 +217,7 @@ export default async function IntegrationsPage() {
             <h2 className="text-sm font-semibold text-slate-900">Sync history</h2>
           </div>
           {recentRuns.length === 0 ? (
-            <p className="px-5 py-6 text-sm text-slate-500">
-              No syncs have run yet.
-            </p>
+            <p className="px-5 py-6 text-sm text-slate-500">No syncs have run yet.</p>
           ) : (
             <ul className="divide-y divide-slate-100">
               {recentRuns.map((run) => (
@@ -184,13 +240,10 @@ export default async function IntegrationsPage() {
                       </span>
                     </div>
                     <div className="mt-0.5 text-xs text-slate-500">
-                      {run.itemsSeen} seen · {run.itemsLinked} linked ·{" "}
-                      {run.rulesFired} rules
+                      {run.itemsSeen} seen · {run.itemsLinked} linked · {run.rulesFired} rules
                     </div>
                     {run.error && (
-                      <div className="mt-0.5 truncate text-xs text-rose-600">
-                        {run.error}
-                      </div>
+                      <div className="mt-0.5 truncate text-xs text-rose-600">{run.error}</div>
                     )}
                   </div>
                   <span className="shrink-0 text-xs text-slate-400">

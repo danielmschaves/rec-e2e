@@ -11,24 +11,23 @@ export const dynamic = "force-dynamic";
 
 // Phrased to read as a sentence after "When …".
 const TRIGGER_LABEL: Record<RuleTrigger, string> = {
-  EMAIL_RECEIVED_FROM_CANDIDATE: "a candidate emails us",
-  EMAIL_SENT_TO_CANDIDATE: "we email a candidate",
-  CALENDAR_EVENT_SCHEDULED: "an event is booked",
-  CALENDAR_EVENT_COMPLETED: "an event finishes",
-  CALENDAR_EVENT_CANCELLED: "an event is cancelled",
+  EMAIL_RECEIVED_FROM_COMPANY: "a company emails you",
+  EMAIL_SENT_TO_COMPANY: "you email a company",
+  CALENDAR_EVENT_SCHEDULED: "an invite lands in your calendar",
+  CALENDAR_EVENT_COMPLETED: "an interview finishes",
+  CALENDAR_EVENT_CANCELLED: "an interview is cancelled",
   DRIVE_FILE_ADDED: "a document appears in Drive",
-  STAGE_SLA_BREACHED: "a stage runs past its target",
-  APPLICATION_CREATED: "an application is created",
-  SCORECARD_SUBMITTED: "a scorecard is submitted",
+  STAGE_WENT_QUIET: "a process goes quiet",
+  OPPORTUNITY_CREATED: "you start tracking a process",
 };
 
 const ACTION_LABEL: Record<RuleAction, string> = {
-  ADVANCE_STAGE: "advance to the next stage",
-  SET_STAGE: "move to a specific stage",
-  COMPLETE_CURRENT_STAGE: "mark the current stage complete",
-  SET_APPLICATION_STATUS: "change the application status",
-  ATTACH_TO_APPLICATION: "attach it to the application",
-  FLAG_FOR_REVIEW: "flag it for a human",
+  ADVANCE_STAGE: "move to the next stage",
+  SET_STAGE: "jump to a specific stage",
+  COMPLETE_CURRENT_STAGE: "mark the current stage done",
+  SET_OPPORTUNITY_STATUS: "change the process status",
+  SET_NEXT_ACTION: "set your next action",
+  FLAG_FOR_REVIEW: "flag it for you",
   LOG_ACTIVITY: "log it to the timeline",
 };
 
@@ -36,10 +35,13 @@ export default async function AutomationsPage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  const rules = await prisma.automationRule.findMany({
-    where: { orgId: user.orgId },
-    orderBy: [{ trigger: "asc" }, { priority: "asc" }],
-  });
+  const [rules, draftCount] = await Promise.all([
+    prisma.automationRule.findMany({
+      where: { userId: user.id },
+      orderBy: [{ trigger: "asc" }, { priority: "asc" }],
+    }),
+    prisma.emailDraft.count({ where: { userId: user.id, status: "DRAFT" } }),
+  ]);
 
   const grouped = rules.reduce<Record<string, typeof rules>>((acc, rule) => {
     (acc[rule.trigger] ??= []).push(rule);
@@ -47,10 +49,10 @@ export default async function AutomationsPage() {
   }, {});
 
   return (
-    <Shell user={user} active="/automations">
+    <Shell user={user} active="/automations" badges={{ "/drafts": draftCount }}>
       <PageHeader
         title="Automations"
-        subtitle="What each Google signal means for your process. Rules run in priority order and the first match wins."
+        subtitle="What each signal from your inbox means for your tracker. Rules run in priority order and the first match wins."
       />
 
       <div className="space-y-6 p-6">
@@ -69,7 +71,7 @@ export default async function AutomationsPage() {
             <ul className="divide-y divide-slate-100">
               {triggerRules.map((rule) => {
                 const conditions = rule.conditions as Record<string, unknown>;
-                const conditionChips = Object.entries(conditions)
+                const chips = Object.entries(conditions)
                   .filter(([, value]) => Array.isArray(value) && value.length > 0)
                   .map(([key, value]) => `${key}: ${(value as string[]).join(", ")}`);
 
@@ -93,17 +95,13 @@ export default async function AutomationsPage() {
                       </div>
 
                       {rule.description && (
-                        <p className="mt-1 text-sm text-slate-500">
-                          {rule.description}
-                        </p>
+                        <p className="mt-1 text-sm text-slate-500">{rule.description}</p>
                       )}
 
                       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
                         <ArrowRight className="h-3 w-3 text-slate-400" strokeWidth={2.5} />
-                        <span className="text-slate-600">
-                          {ACTION_LABEL[rule.action]}
-                        </span>
-                        {conditionChips.map((chip) => (
+                        <span className="text-slate-600">{ACTION_LABEL[rule.action]}</span>
+                        {chips.map((chip) => (
                           <span
                             key={chip}
                             className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500"

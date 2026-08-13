@@ -42,27 +42,17 @@ export async function GET(request: NextRequest) {
     const email = profile.data.email?.toLowerCase();
     if (!email) return NextResponse.redirect(appUrl("/login?error=no_email"));
 
-    // Everyone signing in lands in one workspace for the MVP: the first org, or
-    // a new one named after their email domain.
-    let user = await prisma.user.findUnique({ where: { email } });
-    if (!user) {
-      const domain = email.split("@")[1] ?? "workspace";
-      const org =
-        (await prisma.organization.findFirst({ orderBy: { createdAt: "asc" } })) ??
-        (await prisma.organization.create({
-          data: { name: domain, slug: domain.replace(/[^a-z0-9]+/g, "-") },
-        }));
-
-      user = await prisma.user.create({
-        data: {
-          orgId: org.id,
-          email,
-          name: profile.data.name ?? email,
-          avatarUrl: profile.data.picture ?? null,
-          role: "RECRUITER",
-        },
-      });
-    }
+    // Single-user app: signing in with Google either finds your account or
+    // creates it.
+    const user = await prisma.user.upsert({
+      where: { email },
+      create: {
+        email,
+        name: profile.data.name ?? email,
+        avatarUrl: profile.data.picture ?? null,
+      },
+      update: { avatarUrl: profile.data.picture ?? undefined },
+    });
 
     const scopes = tokens.scope?.split(" ") ?? [];
 
@@ -88,7 +78,7 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    await createSession({ userId: user.id, orgId: user.orgId });
+    await createSession({ userId: user.id });
 
     // Best-effort: if Redis is down, sign-in should still succeed.
     try {

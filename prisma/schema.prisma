@@ -1,15 +1,19 @@
-// Recruitment E2E — data model
+// Job-search companion — data model
 //
-// Design notes:
-// - A Pipeline is a reusable *template*. A Job points at a pipeline.
-// - When an Application is created, the pipeline's stages are COPIED into
-//   ApplicationStage rows. From then on the application owns its own flow,
-//   so a recruiter can personalize it (add a stage, skip one, reorder) without
-//   mutating the template or other candidates. This is the "standard flow ->
-//   progressive personalization" mechanic.
-// - Everything observed from Google (mail, events, files) lands in its own
-//   table, is linked back to an Application, and is replayed through the
-//   automation engine which may move the application forward.
+// Persona: ONE user (you), tracking the many recruitment processes you are
+// going through as a candidate. Everything hangs off `User`.
+//
+// Design notes carried over from the process engine:
+// - A ProcessTemplate is a reusable *standard flow*. When you start tracking an
+//   Opportunity, the template's stages are COPIED into OpportunityStage rows.
+//   The opportunity then owns its flow, so you can personalize one company's
+//   process (they added a founder chat; they waived the take-home) without
+//   touching the template or any other opportunity.
+// - Google sync watches YOUR mailbox. Recruiter mail is matched to the right
+//   opportunity by contact address or company domain, then replayed through the
+//   automation engine, which may advance the stage.
+// - The assistant never sends email on its own. It writes an EmailDraft; you
+//   approve and send.
 
 generator client {
   provider = "prisma-client-js"
@@ -21,67 +25,49 @@ datasource db {
 }
 
 // ---------------------------------------------------------------------------
-// Tenancy & identity
+// You
 // ---------------------------------------------------------------------------
-
-model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  users           User[]
-  pipelines       Pipeline[]
-  jobs            Job[]
-  candidates      Candidate[]
-  applications    Application[]
-  activities      Activity[]
-  emailMessages   EmailMessage[]
-  calendarEvents  CalendarEvent[]
-  driveFiles      DriveFile[]
-  automationRules AutomationRule[]
-  emailTemplates  EmailTemplate[]
-  syncRuns        SyncRun[]
-}
-
-enum UserRole {
-  ADMIN
-  RECRUITER
-  HIRING_MANAGER
-  INTERVIEWER
-}
 
 model User {
   id        String   @id @default(cuid())
-  orgId     String
   email     String   @unique
   name      String
   avatarUrl String?
-  role      UserRole @default(RECRUITER)
+  headline  String?
+  /// Free-text context the assistant uses when drafting on your behalf:
+  /// seniority, stack, what you're looking for, salary expectations.
+  profile   String?
+  timezone  String   @default("UTC")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  org           Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  googleAccount GoogleAccount?
-  notes         Note[]
-  ownedJobs     Job[]          @relation("JobOwner")
-  scorecards    Scorecard[]
-
-  @@index([orgId])
+  googleAccount    GoogleAccount?
+  companies        Company[]
+  contacts         Contact[]
+  templates        ProcessTemplate[]
+  opportunities    Opportunity[]
+  activities       Activity[]
+  emails           EmailMessage[]
+  emailDrafts      EmailDraft[]
+  calendarEvents   CalendarEvent[]
+  driveFiles       DriveFile[]
+  challenges       Challenge[]
+  assistantThreads AssistantThread[]
+  automationRules  AutomationRule[]
+  notes            Note[]
+  syncRuns         SyncRun[]
 }
 
-/// OAuth tokens + per-provider incremental sync cursors for one user.
+/// OAuth tokens + per-provider incremental sync cursors.
 model GoogleAccount {
-  id           String   @id @default(cuid())
-  userId       String   @unique
+  id           String    @id @default(cuid())
+  userId       String    @unique
   email        String
   accessToken  String
   refreshToken String?
   expiresAt    DateTime?
-  scopes       String[] @default([])
+  scopes       String[]  @default([])
 
-  // Incremental sync cursors — each Google API has its own flavour.
   gmailHistoryId      String?
   calendarSyncToken   String?
   driveStartPageToken String?
@@ -96,27 +82,83 @@ model GoogleAccount {
 }
 
 // ---------------------------------------------------------------------------
-// Pipeline templates
+// Companies & the people at them
+// ---------------------------------------------------------------------------
+
+model Company {
+  id      String   @id @default(cuid())
+  userId  String
+  name    String
+  /// Email domains that identify this company, e.g. ["acme.com", "acme.io"].
+  /// This is how recruiter mail from an unknown address still gets matched.
+  domains String[] @default([])
+  website String?
+  notes   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contacts      Contact[]
+  opportunities Opportunity[]
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+enum ContactRole {
+  RECRUITER
+  HIRING_MANAGER
+  INTERVIEWER
+  REFERRAL
+  OTHER
+}
+
+model Contact {
+  id        String      @id @default(cuid())
+  userId    String
+  companyId String?
+  name      String
+  email     String
+  role      ContactRole @default(RECRUITER)
+  title     String?
+  linkedinUrl String?
+  notes     String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, email])
+  @@index([userId])
+  @@index([companyId])
+}
+
+// ---------------------------------------------------------------------------
+// Standard flows
 // ---------------------------------------------------------------------------
 
 /// Semantic meaning of a stage. Automations key off this rather than the name,
-/// so a stage called "Tech Screen" or "Entrevista Técnica" both behave alike.
+/// so "Tech Screen" and "Entrevista Técnica" behave alike.
 enum StageType {
-  SOURCED
+  RESEARCHING
   APPLIED
-  SCREENING
-  ASSESSMENT
-  INTERVIEW
+  RECRUITER_SCREEN
+  TAKE_HOME
+  TECHNICAL_INTERVIEW
+  BEHAVIOURAL_INTERVIEW
+  ONSITE
+  SYSTEM_DESIGN
   REFERENCE_CHECK
   OFFER
-  HIRED
+  ACCEPTED
   REJECTED
   CUSTOM
 }
 
-model Pipeline {
+model ProcessTemplate {
   id          String   @id @default(cuid())
-  orgId       String
+  userId      String
   name        String
   description String?
   isDefault   Boolean  @default(false)
@@ -124,149 +166,122 @@ model Pipeline {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  org    Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  stages PipelineStage[]
-  jobs   Job[]
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stages        TemplateStage[]
+  opportunities Opportunity[]
 
-  @@unique([orgId, name])
-  @@index([orgId])
+  @@unique([userId, name])
+  @@index([userId])
 }
 
-model PipelineStage {
-  id         String    @id @default(cuid())
-  pipelineId String
-  name       String
+model TemplateStage {
+  id          String    @id @default(cuid())
+  templateId  String
+  name        String
   /// Stable machine key, e.g. "tech_interview". Used by automation rules.
-  key        String
-  type       StageType @default(CUSTOM)
-  position   Int
-  /// Target days in this stage before it is flagged as stalled.
-  slaDays    Int?
-  /// Whether recruiters may drop this stage when personalizing an application.
-  optional   Boolean   @default(false)
+  key         String
+  type        StageType @default(CUSTOM)
+  position    Int
+  /// Days you'd expect to wait here before chasing them.
+  chaseAfterDays Int?
   description String?
 
-  pipeline Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  template ProcessTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
 
-  @@unique([pipelineId, key])
-  @@index([pipelineId])
+  @@unique([templateId, key])
+  @@index([templateId])
 }
 
 // ---------------------------------------------------------------------------
-// Jobs & candidates
+// Opportunities — one recruitment process you are going through
 // ---------------------------------------------------------------------------
 
-enum JobStatus {
-  DRAFT
-  OPEN
-  ON_HOLD
-  CLOSED
-  FILLED
-}
-
-model Job {
-  id             String    @id @default(cuid())
-  orgId          String
-  pipelineId     String
-  ownerId        String?
-  title          String
-  department     String?
-  location       String?
-  employmentType String?
-  description    String?
-  status         JobStatus @default(OPEN)
-  openings       Int       @default(1)
-  /// Google Drive folder holding this job's documents.
-  driveFolderId  String?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
-
-  org          Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  pipeline     Pipeline      @relation(fields: [pipelineId], references: [id])
-  owner        User?         @relation("JobOwner", fields: [ownerId], references: [id])
-  applications Application[]
-
-  @@index([orgId, status])
-}
-
-model Candidate {
-  id          String   @id @default(cuid())
-  orgId       String
-  fullName    String
-  email       String
-  phone       String?
-  linkedinUrl String?
-  location    String?
-  headline    String?
-  source      String?
-  tags        String[] @default([])
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  org          Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  applications Application[]
-  activities   Activity[]
-  emails       EmailMessage[]
-  driveFiles   DriveFile[]
-
-  @@unique([orgId, email])
-  @@index([orgId])
-}
-
-// ---------------------------------------------------------------------------
-// Applications — the unit the whole product revolves around
-// ---------------------------------------------------------------------------
-
-enum ApplicationStatus {
+enum OpportunityStatus {
   ACTIVE
   ON_HOLD
-  HIRED
+  OFFER
+  ACCEPTED
   REJECTED
   WITHDRAWN
+  GHOSTED
 }
 
-/// How much this application has diverged from its pipeline template.
 enum FlowMode {
   /// Follows the template exactly.
   STANDARD
-  /// Stages were added / removed / reordered for this candidate.
+  /// Stages were added / skipped / reordered for this company.
   PERSONALIZED
 }
 
-model Application {
-  id             String            @id @default(cuid())
-  orgId          String
-  jobId          String
-  candidateId    String
-  status         ApplicationStatus @default(ACTIVE)
-  flowMode       FlowMode          @default(STANDARD)
-  currentStageId String?           @unique
-  rating         Int?
-  rejectReason   String?
-  /// Gmail thread that this application's correspondence lives in.
-  emailThreadId  String?
-  driveFolderId  String?
-  appliedAt      DateTime          @default(now())
-  lastActivityAt DateTime          @default(now())
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
+enum Priority {
+  DREAM
+  HIGH
+  MEDIUM
+  LOW
+}
 
-  org            Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  job            Job                @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  candidate      Candidate          @relation(fields: [candidateId], references: [id], onDelete: Cascade)
-  currentStage   ApplicationStage?  @relation("CurrentStage", fields: [currentStageId], references: [id])
-  stages         ApplicationStage[] @relation("ApplicationStages")
+enum WorkMode {
+  REMOTE
+  HYBRID
+  ONSITE
+}
+
+model Opportunity {
+  id         String            @id @default(cuid())
+  userId     String
+  companyId  String
+  templateId String
+  roleTitle  String
+  status     OpportunityStatus @default(ACTIVE)
+  flowMode   FlowMode          @default(STANDARD)
+  priority   Priority          @default(MEDIUM)
+
+  currentStageId String? @unique
+
+  location    String?
+  workMode    WorkMode?
+  jobPostUrl  String?
+  source      String?
+  salaryMin   Int?
+  salaryMax   Int?
+  currency    String?   @default("EUR")
+  /// Your own 1-5 read on how excited you are.
+  excitement  Int?
+  notesSummary String?
+
+  /// What you owe them (or they owe you) next, surfaced on the dashboard.
+  nextAction   String?
+  nextActionAt DateTime?
+
+  /// Gmail thread the correspondence lives in.
+  emailThreadId String?
+  driveFolderId String?
+
+  appliedAt      DateTime  @default(now())
+  lastActivityAt DateTime  @default(now())
+  closedAt       DateTime?
+  closeReason    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company        Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  template       ProcessTemplate   @relation(fields: [templateId], references: [id])
+  currentStage   OpportunityStage? @relation("CurrentStage", fields: [currentStageId], references: [id])
+  stages         OpportunityStage[] @relation("OpportunityStages")
   transitions    StageTransition[]
   activities     Activity[]
   notes          Note[]
-  scorecards     Scorecard[]
   emails         EmailMessage[]
+  emailDrafts    EmailDraft[]
   calendarEvents CalendarEvent[]
   driveFiles     DriveFile[]
+  challenges     Challenge[]
+  threads        AssistantThread[]
 
-  @@unique([jobId, candidateId])
-  @@index([orgId, status])
-  @@index([jobId])
+  @@unique([userId, companyId, roleTitle])
+  @@index([userId, status])
+  @@index([userId, lastActivityAt])
 }
 
 enum StageStatus {
@@ -277,42 +292,42 @@ enum StageStatus {
   FAILED
 }
 
-/// A per-application copy of a pipeline stage. Owning the copy is what makes
+/// A per-opportunity copy of a template stage. Owning the copy is what makes
 /// personalization safe: edits here never touch the template.
-model ApplicationStage {
+model OpportunityStage {
   id            String      @id @default(cuid())
-  applicationId String
-  /// Null when the stage was added ad hoc for this candidate.
-  templateId    String?
+  opportunityId String
+  templateStageId String?
   name          String
   key           String
   type          StageType   @default(CUSTOM)
   position      Int
   status        StageStatus @default(PENDING)
-  slaDays       Int?
+  chaseAfterDays Int?
   notes         String?
-  /// True when this stage does not come from the pipeline template.
+  /// True when this stage does not come from the template.
   isCustom      Boolean     @default(false)
   enteredAt     DateTime?
   completedAt   DateTime?
-  dueAt         DateTime?
+  chaseAt       DateTime?
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
 
-  application    Application       @relation("ApplicationStages", fields: [applicationId], references: [id], onDelete: Cascade)
-  currentOf      Application?      @relation("CurrentStage")
+  opportunity     Opportunity       @relation("OpportunityStages", fields: [opportunityId], references: [id], onDelete: Cascade)
+  currentOf       Opportunity?      @relation("CurrentStage")
   fromTransitions StageTransition[] @relation("FromStage")
   toTransitions   StageTransition[] @relation("ToStage")
-  calendarEvents CalendarEvent[]
-  scorecards     Scorecard[]
+  calendarEvents  CalendarEvent[]
+  challenges      Challenge[]
 
-  @@unique([applicationId, key])
-  @@index([applicationId, position])
+  @@unique([opportunityId, key])
+  @@index([opportunityId, position])
 }
 
 /// Who or what caused a change.
 enum ActorType {
   USER
+  ASSISTANT
   AUTOMATION
   SYNC
   SYSTEM
@@ -320,60 +335,149 @@ enum ActorType {
 
 model StageTransition {
   id            String    @id @default(cuid())
-  applicationId String
+  opportunityId String
   fromStageId   String?
   toStageId     String?
   actorType     ActorType @default(USER)
-  actorId       String?
-  /// Automation rule that fired, when actorType is AUTOMATION.
   ruleId        String?
   reason        String?
   createdAt     DateTime  @default(now())
 
-  application Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  fromStage   ApplicationStage? @relation("FromStage", fields: [fromStageId], references: [id], onDelete: SetNull)
-  toStage     ApplicationStage? @relation("ToStage", fields: [toStageId], references: [id], onDelete: SetNull)
+  opportunity Opportunity       @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+  fromStage   OpportunityStage? @relation("FromStage", fields: [fromStageId], references: [id], onDelete: SetNull)
+  toStage     OpportunityStage? @relation("ToStage", fields: [toStageId], references: [id], onDelete: SetNull)
 
-  @@index([applicationId, createdAt])
+  @@index([opportunityId, createdAt])
 }
 
 model Note {
   id            String   @id @default(cuid())
-  applicationId String
-  authorId      String?
+  userId        String
+  opportunityId String?
   body          String
   createdAt     DateTime @default(now())
 
-  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  author      User?       @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opportunity Opportunity? @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
 
-  @@index([applicationId])
+  @@index([opportunityId])
 }
 
-enum ScorecardVerdict {
-  STRONG_YES
-  YES
-  NEUTRAL
-  NO
-  STRONG_NO
+// ---------------------------------------------------------------------------
+// Technical challenges — the guided workspace
+// ---------------------------------------------------------------------------
+
+enum ChallengeStatus {
+  NOT_STARTED
+  PLANNING
+  IN_PROGRESS
+  READY_FOR_REVIEW
+  SUBMITTED
+  PASSED
+  FAILED
 }
 
-model Scorecard {
-  id            String           @id @default(cuid())
-  applicationId String
+model Challenge {
+  id            String          @id @default(cuid())
+  userId        String
+  opportunityId String
   stageId       String?
-  authorId      String?
-  verdict       ScorecardVerdict
-  score         Int?
-  strengths     String?
-  concerns      String?
-  createdAt     DateTime         @default(now())
+  title         String
+  /// The brief exactly as they sent it — pasted, uploaded, or pulled from mail.
+  brief         String?
+  briefSource   String?
+  /// The assistant's proposed approach, kept editable.
+  plan          String?
+  /// Your own working notes.
+  notes         String?
+  status        ChallengeStatus @default(NOT_STARTED)
+  deadline      DateTime?
+  estimatedHours Int?
+  repoUrl       String?
+  submissionUrl String?
+  submittedAt   DateTime?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
 
-  application Application       @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  stage       ApplicationStage? @relation(fields: [stageId], references: [id], onDelete: SetNull)
-  author      User?             @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  user         User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opportunity  Opportunity           @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+  stage        OpportunityStage?     @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  requirements ChallengeRequirement[]
+  threads      AssistantThread[]
 
-  @@index([applicationId])
+  @@index([userId, status])
+  @@index([opportunityId])
+}
+
+/// One checkable item extracted from the brief. The assistant proposes these;
+/// you tick them off. Explicit requirements are what stops a take-home failing
+/// on something that was stated in paragraph four.
+model ChallengeRequirement {
+  id          String   @id @default(cuid())
+  challengeId String
+  text        String
+  /// "must have" vs "nice to have" as stated in the brief.
+  mustHave    Boolean  @default(true)
+  done        Boolean  @default(false)
+  position    Int
+  notes       String?
+  /// True when the assistant extracted it rather than you typing it.
+  fromBrief   Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  challenge Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+
+  @@index([challengeId, position])
+}
+
+// ---------------------------------------------------------------------------
+// The assistant
+// ---------------------------------------------------------------------------
+
+model AssistantThread {
+  id            String   @id @default(cuid())
+  userId        String
+  /// Threads are usually scoped to one opportunity or challenge, which is what
+  /// gets loaded into the model's context.
+  opportunityId String?
+  challengeId   String?
+  title         String   @default("New conversation")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opportunity Opportunity?       @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+  challenge   Challenge?         @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  messages    AssistantMessage[]
+
+  @@index([userId, updatedAt])
+  @@index([opportunityId])
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  TOOL
+}
+
+model AssistantMessage {
+  id       String      @id @default(cuid())
+  threadId String
+  role     MessageRole
+  /// Rendered text. Empty for a pure tool-call turn.
+  content  String      @default("")
+  /// Raw Anthropic content blocks, replayed verbatim on the next turn.
+  blocks   Json?
+  /// Human-readable summary of any tools used, for the transcript UI.
+  toolSummary String?
+  inputTokens  Int?
+  outputTokens Int?
+  isError   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  thread AssistantThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, createdAt])
 }
 
 // ---------------------------------------------------------------------------
@@ -387,9 +491,8 @@ enum EmailDirection {
 
 model EmailMessage {
   id            String         @id @default(cuid())
-  orgId         String
-  applicationId String?
-  candidateId   String?
+  userId        String
+  opportunityId String?
   gmailId       String
   threadId      String
   direction     EmailDirection
@@ -404,13 +507,47 @@ model EmailMessage {
   sentAt        DateTime
   createdAt     DateTime       @default(now())
 
-  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  application Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
-  candidate   Candidate?   @relation(fields: [candidateId], references: [id], onDelete: SetNull)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opportunity Opportunity? @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
 
-  @@unique([orgId, gmailId])
-  @@index([applicationId, sentAt])
+  @@unique([userId, gmailId])
+  @@index([opportunityId, sentAt])
   @@index([threadId])
+}
+
+enum DraftStatus {
+  DRAFT
+  SENT
+  DISCARDED
+}
+
+/// An outbound email awaiting your approval.
+///
+/// The assistant can only ever create one of these — sending is a separate,
+/// explicitly user-triggered action. Nothing leaves your account without a
+/// click.
+model EmailDraft {
+  id            String      @id @default(cuid())
+  userId        String
+  opportunityId String?
+  toEmail       String
+  subject       String
+  body          String
+  threadId      String?
+  status        DraftStatus @default(DRAFT)
+  /// Why the assistant wrote it, shown above the draft.
+  rationale     String?
+  createdBy     ActorType   @default(ASSISTANT)
+  sentAt        DateTime?
+  gmailId       String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opportunity Opportunity? @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([opportunityId])
 }
 
 enum EventStatus {
@@ -421,8 +558,8 @@ enum EventStatus {
 
 model CalendarEvent {
   id             String      @id @default(cuid())
-  orgId          String
-  applicationId  String?
+  userId         String
+  opportunityId  String?
   stageId        String?
   googleEventId  String
   calendarId     String      @default("primary")
@@ -440,30 +577,30 @@ model CalendarEvent {
   createdAt      DateTime    @default(now())
   updatedAt      DateTime    @updatedAt
 
-  org         Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  application Application?      @relation(fields: [applicationId], references: [id], onDelete: SetNull)
-  stage       ApplicationStage? @relation(fields: [stageId], references: [id], onDelete: SetNull)
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opportunity Opportunity?      @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
+  stage       OpportunityStage? @relation(fields: [stageId], references: [id], onDelete: SetNull)
 
-  @@unique([orgId, googleEventId])
-  @@index([applicationId, startsAt])
+  @@unique([userId, googleEventId])
+  @@index([opportunityId, startsAt])
   @@index([startsAt])
 }
 
 enum DriveFileKind {
-  RESUME
+  CV
   COVER_LETTER
   PORTFOLIO
-  ASSESSMENT
+  CHALLENGE_BRIEF
+  CHALLENGE_SOLUTION
   OFFER_LETTER
-  NOTES
+  RESEARCH
   OTHER
 }
 
 model DriveFile {
   id            String        @id @default(cuid())
-  orgId         String
-  applicationId String?
-  candidateId   String?
+  userId        String
+  opportunityId String?
   googleFileId  String
   name          String
   mimeType      String
@@ -474,12 +611,11 @@ model DriveFile {
   modifiedAt    DateTime?
   createdAt     DateTime      @default(now())
 
-  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  application Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
-  candidate   Candidate?   @relation(fields: [candidateId], references: [id], onDelete: SetNull)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opportunity Opportunity? @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
 
-  @@unique([orgId, googleFileId])
-  @@index([applicationId])
+  @@unique([userId, googleFileId])
+  @@index([opportunityId])
 }
 
 // ---------------------------------------------------------------------------
@@ -487,71 +623,51 @@ model DriveFile {
 // ---------------------------------------------------------------------------
 
 enum RuleTrigger {
-  EMAIL_RECEIVED_FROM_CANDIDATE
-  EMAIL_SENT_TO_CANDIDATE
+  EMAIL_RECEIVED_FROM_COMPANY
+  EMAIL_SENT_TO_COMPANY
   CALENDAR_EVENT_SCHEDULED
   CALENDAR_EVENT_COMPLETED
   CALENDAR_EVENT_CANCELLED
   DRIVE_FILE_ADDED
-  STAGE_SLA_BREACHED
-  APPLICATION_CREATED
-  SCORECARD_SUBMITTED
+  STAGE_WENT_QUIET
+  OPPORTUNITY_CREATED
 }
 
 enum RuleAction {
   ADVANCE_STAGE
   SET_STAGE
   COMPLETE_CURRENT_STAGE
-  SET_APPLICATION_STATUS
-  ATTACH_TO_APPLICATION
+  SET_OPPORTUNITY_STATUS
+  SET_NEXT_ACTION
   FLAG_FOR_REVIEW
   LOG_ACTIVITY
 }
 
 model AutomationRule {
-  id      String      @id @default(cuid())
-  orgId   String
-  name    String
+  id          String      @id @default(cuid())
+  userId      String
+  name        String
   description String?
-  enabled Boolean     @default(true)
-  trigger RuleTrigger
-  action  RuleAction
+  enabled     Boolean     @default(true)
+  trigger     RuleTrigger
+  action      RuleAction
   /// Evaluation order; lower runs first, first matching rule per trigger wins.
-  priority Int        @default(100)
+  priority    Int         @default(100)
 
-  /// Optional scoping — a rule may apply only to one pipeline or one job.
-  pipelineId String?
-  jobId      String?
-
-  /// Free-form matchers, e.g. { "titleContains": ["interview"], "stageType": "SCREENING" }
+  /// Free-form matchers, e.g. { "titleContains": ["interview"] }
   conditions Json @default("{}")
   /// Action parameters, e.g. { "stageKey": "tech_interview" }
   config     Json @default("{}")
 
-  timesFired Int       @default(0)
+  timesFired  Int       @default(0)
   lastFiredAt DateTime?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
-  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([orgId, trigger, enabled])
-}
-
-model EmailTemplate {
-  id        String   @id @default(cuid())
-  orgId     String
-  name      String
-  subject   String
-  body      String
-  /// Stage this template is suggested for.
-  stageKey  String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-
-  @@unique([orgId, name])
+  @@unique([userId, name])
+  @@index([userId, trigger, enabled])
 }
 
 // ---------------------------------------------------------------------------
@@ -559,30 +675,31 @@ model EmailTemplate {
 // ---------------------------------------------------------------------------
 
 enum ActivityType {
-  APPLICATION_CREATED
+  OPPORTUNITY_CREATED
   STAGE_CHANGED
   STAGE_COMPLETED
   EMAIL_RECEIVED
   EMAIL_SENT
+  DRAFT_CREATED
   INTERVIEW_SCHEDULED
   INTERVIEW_COMPLETED
   INTERVIEW_CANCELLED
   FILE_ATTACHED
   NOTE_ADDED
-  SCORECARD_ADDED
+  CHALLENGE_CREATED
+  CHALLENGE_UPDATED
   STATUS_CHANGED
   FLAGGED
+  ASSISTANT
   SYNC
 }
 
 model Activity {
   id            String       @id @default(cuid())
-  orgId         String
-  applicationId String?
-  candidateId   String?
+  userId        String
+  opportunityId String?
   type          ActivityType
   actorType     ActorType    @default(SYSTEM)
-  actorId       String?
   title         String
   body          String?
   /// Provenance: gmail message id, calendar event id, drive file id...
@@ -591,12 +708,11 @@ model Activity {
   occurredAt    DateTime     @default(now())
   createdAt     DateTime     @default(now())
 
-  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  application Application? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  candidate   Candidate?   @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  opportunity Opportunity? @relation(fields: [opportunityId], references: [id], onDelete: Cascade)
 
-  @@index([orgId, occurredAt])
-  @@index([applicationId, occurredAt])
+  @@index([userId, occurredAt])
+  @@index([opportunityId, occurredAt])
 }
 
 enum SyncProvider {
@@ -612,19 +728,18 @@ enum SyncStatus {
 }
 
 model SyncRun {
-  id             String       @id @default(cuid())
-  orgId          String
-  userId         String?
-  provider       SyncProvider
-  status         SyncStatus   @default(RUNNING)
-  itemsSeen      Int          @default(0)
-  itemsLinked    Int          @default(0)
-  rulesFired     Int          @default(0)
-  error          String?
-  startedAt      DateTime     @default(now())
-  finishedAt     DateTime?
+  id          String       @id @default(cuid())
+  userId      String
+  provider    SyncProvider
+  status      SyncStatus   @default(RUNNING)
+  itemsSeen   Int          @default(0)
+  itemsLinked Int          @default(0)
+  rulesFired  Int          @default(0)
+  error       String?
+  startedAt   DateTime     @default(now())
+  finishedAt  DateTime?
 
-  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@index([orgId, provider, startedAt])
+  @@index([userId, provider, startedAt])
 }

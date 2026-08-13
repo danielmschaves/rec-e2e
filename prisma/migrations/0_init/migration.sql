@@ -2,46 +2,55 @@
 CREATE SCHEMA IF NOT EXISTS "public";
 
 -- CreateEnum
-CREATE TYPE "UserRole" AS ENUM ('ADMIN', 'RECRUITER', 'HIRING_MANAGER', 'INTERVIEWER');
+CREATE TYPE "ContactRole" AS ENUM ('RECRUITER', 'HIRING_MANAGER', 'INTERVIEWER', 'REFERRAL', 'OTHER');
 
 -- CreateEnum
-CREATE TYPE "StageType" AS ENUM ('SOURCED', 'APPLIED', 'SCREENING', 'ASSESSMENT', 'INTERVIEW', 'REFERENCE_CHECK', 'OFFER', 'HIRED', 'REJECTED', 'CUSTOM');
+CREATE TYPE "StageType" AS ENUM ('RESEARCHING', 'APPLIED', 'RECRUITER_SCREEN', 'TAKE_HOME', 'TECHNICAL_INTERVIEW', 'BEHAVIOURAL_INTERVIEW', 'ONSITE', 'SYSTEM_DESIGN', 'REFERENCE_CHECK', 'OFFER', 'ACCEPTED', 'REJECTED', 'CUSTOM');
 
 -- CreateEnum
-CREATE TYPE "JobStatus" AS ENUM ('DRAFT', 'OPEN', 'ON_HOLD', 'CLOSED', 'FILLED');
-
--- CreateEnum
-CREATE TYPE "ApplicationStatus" AS ENUM ('ACTIVE', 'ON_HOLD', 'HIRED', 'REJECTED', 'WITHDRAWN');
+CREATE TYPE "OpportunityStatus" AS ENUM ('ACTIVE', 'ON_HOLD', 'OFFER', 'ACCEPTED', 'REJECTED', 'WITHDRAWN', 'GHOSTED');
 
 -- CreateEnum
 CREATE TYPE "FlowMode" AS ENUM ('STANDARD', 'PERSONALIZED');
 
 -- CreateEnum
+CREATE TYPE "Priority" AS ENUM ('DREAM', 'HIGH', 'MEDIUM', 'LOW');
+
+-- CreateEnum
+CREATE TYPE "WorkMode" AS ENUM ('REMOTE', 'HYBRID', 'ONSITE');
+
+-- CreateEnum
 CREATE TYPE "StageStatus" AS ENUM ('PENDING', 'ACTIVE', 'COMPLETED', 'SKIPPED', 'FAILED');
 
 -- CreateEnum
-CREATE TYPE "ActorType" AS ENUM ('USER', 'AUTOMATION', 'SYNC', 'SYSTEM');
+CREATE TYPE "ActorType" AS ENUM ('USER', 'ASSISTANT', 'AUTOMATION', 'SYNC', 'SYSTEM');
 
 -- CreateEnum
-CREATE TYPE "ScorecardVerdict" AS ENUM ('STRONG_YES', 'YES', 'NEUTRAL', 'NO', 'STRONG_NO');
+CREATE TYPE "ChallengeStatus" AS ENUM ('NOT_STARTED', 'PLANNING', 'IN_PROGRESS', 'READY_FOR_REVIEW', 'SUBMITTED', 'PASSED', 'FAILED');
+
+-- CreateEnum
+CREATE TYPE "MessageRole" AS ENUM ('USER', 'ASSISTANT', 'TOOL');
 
 -- CreateEnum
 CREATE TYPE "EmailDirection" AS ENUM ('INBOUND', 'OUTBOUND');
 
 -- CreateEnum
+CREATE TYPE "DraftStatus" AS ENUM ('DRAFT', 'SENT', 'DISCARDED');
+
+-- CreateEnum
 CREATE TYPE "EventStatus" AS ENUM ('CONFIRMED', 'TENTATIVE', 'CANCELLED');
 
 -- CreateEnum
-CREATE TYPE "DriveFileKind" AS ENUM ('RESUME', 'COVER_LETTER', 'PORTFOLIO', 'ASSESSMENT', 'OFFER_LETTER', 'NOTES', 'OTHER');
+CREATE TYPE "DriveFileKind" AS ENUM ('CV', 'COVER_LETTER', 'PORTFOLIO', 'CHALLENGE_BRIEF', 'CHALLENGE_SOLUTION', 'OFFER_LETTER', 'RESEARCH', 'OTHER');
 
 -- CreateEnum
-CREATE TYPE "RuleTrigger" AS ENUM ('EMAIL_RECEIVED_FROM_CANDIDATE', 'EMAIL_SENT_TO_CANDIDATE', 'CALENDAR_EVENT_SCHEDULED', 'CALENDAR_EVENT_COMPLETED', 'CALENDAR_EVENT_CANCELLED', 'DRIVE_FILE_ADDED', 'STAGE_SLA_BREACHED', 'APPLICATION_CREATED', 'SCORECARD_SUBMITTED');
+CREATE TYPE "RuleTrigger" AS ENUM ('EMAIL_RECEIVED_FROM_COMPANY', 'EMAIL_SENT_TO_COMPANY', 'CALENDAR_EVENT_SCHEDULED', 'CALENDAR_EVENT_COMPLETED', 'CALENDAR_EVENT_CANCELLED', 'DRIVE_FILE_ADDED', 'STAGE_WENT_QUIET', 'OPPORTUNITY_CREATED');
 
 -- CreateEnum
-CREATE TYPE "RuleAction" AS ENUM ('ADVANCE_STAGE', 'SET_STAGE', 'COMPLETE_CURRENT_STAGE', 'SET_APPLICATION_STATUS', 'ATTACH_TO_APPLICATION', 'FLAG_FOR_REVIEW', 'LOG_ACTIVITY');
+CREATE TYPE "RuleAction" AS ENUM ('ADVANCE_STAGE', 'SET_STAGE', 'COMPLETE_CURRENT_STAGE', 'SET_OPPORTUNITY_STATUS', 'SET_NEXT_ACTION', 'FLAG_FOR_REVIEW', 'LOG_ACTIVITY');
 
 -- CreateEnum
-CREATE TYPE "ActivityType" AS ENUM ('APPLICATION_CREATED', 'STAGE_CHANGED', 'STAGE_COMPLETED', 'EMAIL_RECEIVED', 'EMAIL_SENT', 'INTERVIEW_SCHEDULED', 'INTERVIEW_COMPLETED', 'INTERVIEW_CANCELLED', 'FILE_ATTACHED', 'NOTE_ADDED', 'SCORECARD_ADDED', 'STATUS_CHANGED', 'FLAGGED', 'SYNC');
+CREATE TYPE "ActivityType" AS ENUM ('OPPORTUNITY_CREATED', 'STAGE_CHANGED', 'STAGE_COMPLETED', 'EMAIL_RECEIVED', 'EMAIL_SENT', 'DRAFT_CREATED', 'INTERVIEW_SCHEDULED', 'INTERVIEW_COMPLETED', 'INTERVIEW_CANCELLED', 'FILE_ATTACHED', 'NOTE_ADDED', 'CHALLENGE_CREATED', 'CHALLENGE_UPDATED', 'STATUS_CHANGED', 'FLAGGED', 'ASSISTANT', 'SYNC');
 
 -- CreateEnum
 CREATE TYPE "SyncProvider" AS ENUM ('GMAIL', 'CALENDAR', 'DRIVE');
@@ -50,24 +59,14 @@ CREATE TYPE "SyncProvider" AS ENUM ('GMAIL', 'CALENDAR', 'DRIVE');
 CREATE TYPE "SyncStatus" AS ENUM ('RUNNING', 'SUCCESS', 'FAILED');
 
 -- CreateTable
-CREATE TABLE "Organization" (
-    "id" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "slug" TEXT NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "Organization_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
 CREATE TABLE "User" (
     "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
     "email" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "avatarUrl" TEXT,
-    "role" "UserRole" NOT NULL DEFAULT 'RECRUITER',
+    "headline" TEXT,
+    "profile" TEXT,
+    "timezone" TEXT NOT NULL DEFAULT 'UTC',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -96,9 +95,40 @@ CREATE TABLE "GoogleAccount" (
 );
 
 -- CreateTable
-CREATE TABLE "Pipeline" (
+CREATE TABLE "Company" (
     "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "domains" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "website" TEXT,
+    "notes" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Company_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Contact" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "companyId" TEXT,
+    "name" TEXT NOT NULL,
+    "email" TEXT NOT NULL,
+    "role" "ContactRole" NOT NULL DEFAULT 'RECRUITER',
+    "title" TEXT,
+    "linkedinUrl" TEXT,
+    "notes" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Contact_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "ProcessTemplate" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "description" TEXT,
     "isDefault" BOOLEAN NOT NULL DEFAULT false,
@@ -106,113 +136,86 @@ CREATE TABLE "Pipeline" (
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "Pipeline_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "ProcessTemplate_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
-CREATE TABLE "PipelineStage" (
+CREATE TABLE "TemplateStage" (
     "id" TEXT NOT NULL,
-    "pipelineId" TEXT NOT NULL,
+    "templateId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "key" TEXT NOT NULL,
     "type" "StageType" NOT NULL DEFAULT 'CUSTOM',
     "position" INTEGER NOT NULL,
-    "slaDays" INTEGER,
-    "optional" BOOLEAN NOT NULL DEFAULT false,
+    "chaseAfterDays" INTEGER,
     "description" TEXT,
 
-    CONSTRAINT "PipelineStage_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "TemplateStage_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
-CREATE TABLE "Job" (
+CREATE TABLE "Opportunity" (
     "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
-    "pipelineId" TEXT NOT NULL,
-    "ownerId" TEXT,
-    "title" TEXT NOT NULL,
-    "department" TEXT,
-    "location" TEXT,
-    "employmentType" TEXT,
-    "description" TEXT,
-    "status" "JobStatus" NOT NULL DEFAULT 'OPEN',
-    "openings" INTEGER NOT NULL DEFAULT 1,
-    "driveFolderId" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "Job_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Candidate" (
-    "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
-    "fullName" TEXT NOT NULL,
-    "email" TEXT NOT NULL,
-    "phone" TEXT,
-    "linkedinUrl" TEXT,
-    "location" TEXT,
-    "headline" TEXT,
-    "source" TEXT,
-    "tags" TEXT[] DEFAULT ARRAY[]::TEXT[],
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "Candidate_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
-CREATE TABLE "Application" (
-    "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
-    "jobId" TEXT NOT NULL,
-    "candidateId" TEXT NOT NULL,
-    "status" "ApplicationStatus" NOT NULL DEFAULT 'ACTIVE',
+    "userId" TEXT NOT NULL,
+    "companyId" TEXT NOT NULL,
+    "templateId" TEXT NOT NULL,
+    "roleTitle" TEXT NOT NULL,
+    "status" "OpportunityStatus" NOT NULL DEFAULT 'ACTIVE',
     "flowMode" "FlowMode" NOT NULL DEFAULT 'STANDARD',
+    "priority" "Priority" NOT NULL DEFAULT 'MEDIUM',
     "currentStageId" TEXT,
-    "rating" INTEGER,
-    "rejectReason" TEXT,
+    "location" TEXT,
+    "workMode" "WorkMode",
+    "jobPostUrl" TEXT,
+    "source" TEXT,
+    "salaryMin" INTEGER,
+    "salaryMax" INTEGER,
+    "currency" TEXT DEFAULT 'EUR',
+    "excitement" INTEGER,
+    "notesSummary" TEXT,
+    "nextAction" TEXT,
+    "nextActionAt" TIMESTAMP(3),
     "emailThreadId" TEXT,
     "driveFolderId" TEXT,
     "appliedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "lastActivityAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "closedAt" TIMESTAMP(3),
+    "closeReason" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "Application_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "Opportunity_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
-CREATE TABLE "ApplicationStage" (
+CREATE TABLE "OpportunityStage" (
     "id" TEXT NOT NULL,
-    "applicationId" TEXT NOT NULL,
-    "templateId" TEXT,
+    "opportunityId" TEXT NOT NULL,
+    "templateStageId" TEXT,
     "name" TEXT NOT NULL,
     "key" TEXT NOT NULL,
     "type" "StageType" NOT NULL DEFAULT 'CUSTOM',
     "position" INTEGER NOT NULL,
     "status" "StageStatus" NOT NULL DEFAULT 'PENDING',
-    "slaDays" INTEGER,
+    "chaseAfterDays" INTEGER,
     "notes" TEXT,
     "isCustom" BOOLEAN NOT NULL DEFAULT false,
     "enteredAt" TIMESTAMP(3),
     "completedAt" TIMESTAMP(3),
-    "dueAt" TIMESTAMP(3),
+    "chaseAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
-    CONSTRAINT "ApplicationStage_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "OpportunityStage_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "StageTransition" (
     "id" TEXT NOT NULL,
-    "applicationId" TEXT NOT NULL,
+    "opportunityId" TEXT NOT NULL,
     "fromStageId" TEXT,
     "toStageId" TEXT,
     "actorType" "ActorType" NOT NULL DEFAULT 'USER',
-    "actorId" TEXT,
     "ruleId" TEXT,
     "reason" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -223,8 +226,8 @@ CREATE TABLE "StageTransition" (
 -- CreateTable
 CREATE TABLE "Note" (
     "id" TEXT NOT NULL,
-    "applicationId" TEXT NOT NULL,
-    "authorId" TEXT,
+    "userId" TEXT NOT NULL,
+    "opportunityId" TEXT,
     "body" TEXT NOT NULL,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -232,26 +235,77 @@ CREATE TABLE "Note" (
 );
 
 -- CreateTable
-CREATE TABLE "Scorecard" (
+CREATE TABLE "Challenge" (
     "id" TEXT NOT NULL,
-    "applicationId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "opportunityId" TEXT NOT NULL,
     "stageId" TEXT,
-    "authorId" TEXT,
-    "verdict" "ScorecardVerdict" NOT NULL,
-    "score" INTEGER,
-    "strengths" TEXT,
-    "concerns" TEXT,
+    "title" TEXT NOT NULL,
+    "brief" TEXT,
+    "briefSource" TEXT,
+    "plan" TEXT,
+    "notes" TEXT,
+    "status" "ChallengeStatus" NOT NULL DEFAULT 'NOT_STARTED',
+    "deadline" TIMESTAMP(3),
+    "estimatedHours" INTEGER,
+    "repoUrl" TEXT,
+    "submissionUrl" TEXT,
+    "submittedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "Challenge_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "ChallengeRequirement" (
+    "id" TEXT NOT NULL,
+    "challengeId" TEXT NOT NULL,
+    "text" TEXT NOT NULL,
+    "mustHave" BOOLEAN NOT NULL DEFAULT true,
+    "done" BOOLEAN NOT NULL DEFAULT false,
+    "position" INTEGER NOT NULL,
+    "notes" TEXT,
+    "fromBrief" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
-    CONSTRAINT "Scorecard_pkey" PRIMARY KEY ("id")
+    CONSTRAINT "ChallengeRequirement_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "AssistantThread" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "opportunityId" TEXT,
+    "challengeId" TEXT,
+    "title" TEXT NOT NULL DEFAULT 'New conversation',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "AssistantThread_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "AssistantMessage" (
+    "id" TEXT NOT NULL,
+    "threadId" TEXT NOT NULL,
+    "role" "MessageRole" NOT NULL,
+    "content" TEXT NOT NULL DEFAULT '',
+    "blocks" JSONB,
+    "toolSummary" TEXT,
+    "inputTokens" INTEGER,
+    "outputTokens" INTEGER,
+    "isError" BOOLEAN NOT NULL DEFAULT false,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "AssistantMessage_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
 CREATE TABLE "EmailMessage" (
     "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
-    "applicationId" TEXT,
-    "candidateId" TEXT,
+    "userId" TEXT NOT NULL,
+    "opportunityId" TEXT,
     "gmailId" TEXT NOT NULL,
     "threadId" TEXT NOT NULL,
     "direction" "EmailDirection" NOT NULL,
@@ -270,10 +324,30 @@ CREATE TABLE "EmailMessage" (
 );
 
 -- CreateTable
+CREATE TABLE "EmailDraft" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "opportunityId" TEXT,
+    "toEmail" TEXT NOT NULL,
+    "subject" TEXT NOT NULL,
+    "body" TEXT NOT NULL,
+    "threadId" TEXT,
+    "status" "DraftStatus" NOT NULL DEFAULT 'DRAFT',
+    "rationale" TEXT,
+    "createdBy" "ActorType" NOT NULL DEFAULT 'ASSISTANT',
+    "sentAt" TIMESTAMP(3),
+    "gmailId" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "EmailDraft_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
 CREATE TABLE "CalendarEvent" (
     "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
-    "applicationId" TEXT,
+    "userId" TEXT NOT NULL,
+    "opportunityId" TEXT,
     "stageId" TEXT,
     "googleEventId" TEXT NOT NULL,
     "calendarId" TEXT NOT NULL DEFAULT 'primary',
@@ -296,9 +370,8 @@ CREATE TABLE "CalendarEvent" (
 -- CreateTable
 CREATE TABLE "DriveFile" (
     "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
-    "applicationId" TEXT,
-    "candidateId" TEXT,
+    "userId" TEXT NOT NULL,
+    "opportunityId" TEXT,
     "googleFileId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "mimeType" TEXT NOT NULL,
@@ -315,15 +388,13 @@ CREATE TABLE "DriveFile" (
 -- CreateTable
 CREATE TABLE "AutomationRule" (
     "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "description" TEXT,
     "enabled" BOOLEAN NOT NULL DEFAULT true,
     "trigger" "RuleTrigger" NOT NULL,
     "action" "RuleAction" NOT NULL,
     "priority" INTEGER NOT NULL DEFAULT 100,
-    "pipelineId" TEXT,
-    "jobId" TEXT,
     "conditions" JSONB NOT NULL DEFAULT '{}',
     "config" JSONB NOT NULL DEFAULT '{}',
     "timesFired" INTEGER NOT NULL DEFAULT 0,
@@ -335,28 +406,12 @@ CREATE TABLE "AutomationRule" (
 );
 
 -- CreateTable
-CREATE TABLE "EmailTemplate" (
-    "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
-    "name" TEXT NOT NULL,
-    "subject" TEXT NOT NULL,
-    "body" TEXT NOT NULL,
-    "stageKey" TEXT,
-    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-
-    CONSTRAINT "EmailTemplate_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
 CREATE TABLE "Activity" (
     "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
-    "applicationId" TEXT,
-    "candidateId" TEXT,
+    "userId" TEXT NOT NULL,
+    "opportunityId" TEXT,
     "type" "ActivityType" NOT NULL,
     "actorType" "ActorType" NOT NULL DEFAULT 'SYSTEM',
-    "actorId" TEXT,
     "title" TEXT NOT NULL,
     "body" TEXT,
     "externalId" TEXT,
@@ -370,8 +425,7 @@ CREATE TABLE "Activity" (
 -- CreateTable
 CREATE TABLE "SyncRun" (
     "id" TEXT NOT NULL,
-    "orgId" TEXT NOT NULL,
-    "userId" TEXT,
+    "userId" TEXT NOT NULL,
     "provider" "SyncProvider" NOT NULL,
     "status" "SyncStatus" NOT NULL DEFAULT 'RUNNING',
     "itemsSeen" INTEGER NOT NULL DEFAULT 0,
@@ -385,209 +439,233 @@ CREATE TABLE "SyncRun" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Organization_slug_key" ON "Organization"("slug");
-
--- CreateIndex
 CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
-
--- CreateIndex
-CREATE INDEX "User_orgId_idx" ON "User"("orgId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "GoogleAccount_userId_key" ON "GoogleAccount"("userId");
 
 -- CreateIndex
-CREATE INDEX "Pipeline_orgId_idx" ON "Pipeline"("orgId");
+CREATE INDEX "Company_userId_idx" ON "Company"("userId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Pipeline_orgId_name_key" ON "Pipeline"("orgId", "name");
+CREATE UNIQUE INDEX "Company_userId_name_key" ON "Company"("userId", "name");
 
 -- CreateIndex
-CREATE INDEX "PipelineStage_pipelineId_idx" ON "PipelineStage"("pipelineId");
+CREATE INDEX "Contact_userId_idx" ON "Contact"("userId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "PipelineStage_pipelineId_key_key" ON "PipelineStage"("pipelineId", "key");
+CREATE INDEX "Contact_companyId_idx" ON "Contact"("companyId");
 
 -- CreateIndex
-CREATE INDEX "Job_orgId_status_idx" ON "Job"("orgId", "status");
+CREATE UNIQUE INDEX "Contact_userId_email_key" ON "Contact"("userId", "email");
 
 -- CreateIndex
-CREATE INDEX "Candidate_orgId_idx" ON "Candidate"("orgId");
+CREATE INDEX "ProcessTemplate_userId_idx" ON "ProcessTemplate"("userId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Candidate_orgId_email_key" ON "Candidate"("orgId", "email");
+CREATE UNIQUE INDEX "ProcessTemplate_userId_name_key" ON "ProcessTemplate"("userId", "name");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Application_currentStageId_key" ON "Application"("currentStageId");
+CREATE INDEX "TemplateStage_templateId_idx" ON "TemplateStage"("templateId");
 
 -- CreateIndex
-CREATE INDEX "Application_orgId_status_idx" ON "Application"("orgId", "status");
+CREATE UNIQUE INDEX "TemplateStage_templateId_key_key" ON "TemplateStage"("templateId", "key");
 
 -- CreateIndex
-CREATE INDEX "Application_jobId_idx" ON "Application"("jobId");
+CREATE UNIQUE INDEX "Opportunity_currentStageId_key" ON "Opportunity"("currentStageId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "Application_jobId_candidateId_key" ON "Application"("jobId", "candidateId");
+CREATE INDEX "Opportunity_userId_status_idx" ON "Opportunity"("userId", "status");
 
 -- CreateIndex
-CREATE INDEX "ApplicationStage_applicationId_position_idx" ON "ApplicationStage"("applicationId", "position");
+CREATE INDEX "Opportunity_userId_lastActivityAt_idx" ON "Opportunity"("userId", "lastActivityAt");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ApplicationStage_applicationId_key_key" ON "ApplicationStage"("applicationId", "key");
+CREATE UNIQUE INDEX "Opportunity_userId_companyId_roleTitle_key" ON "Opportunity"("userId", "companyId", "roleTitle");
 
 -- CreateIndex
-CREATE INDEX "StageTransition_applicationId_createdAt_idx" ON "StageTransition"("applicationId", "createdAt");
+CREATE INDEX "OpportunityStage_opportunityId_position_idx" ON "OpportunityStage"("opportunityId", "position");
 
 -- CreateIndex
-CREATE INDEX "Note_applicationId_idx" ON "Note"("applicationId");
+CREATE UNIQUE INDEX "OpportunityStage_opportunityId_key_key" ON "OpportunityStage"("opportunityId", "key");
 
 -- CreateIndex
-CREATE INDEX "Scorecard_applicationId_idx" ON "Scorecard"("applicationId");
+CREATE INDEX "StageTransition_opportunityId_createdAt_idx" ON "StageTransition"("opportunityId", "createdAt");
 
 -- CreateIndex
-CREATE INDEX "EmailMessage_applicationId_sentAt_idx" ON "EmailMessage"("applicationId", "sentAt");
+CREATE INDEX "Note_opportunityId_idx" ON "Note"("opportunityId");
+
+-- CreateIndex
+CREATE INDEX "Challenge_userId_status_idx" ON "Challenge"("userId", "status");
+
+-- CreateIndex
+CREATE INDEX "Challenge_opportunityId_idx" ON "Challenge"("opportunityId");
+
+-- CreateIndex
+CREATE INDEX "ChallengeRequirement_challengeId_position_idx" ON "ChallengeRequirement"("challengeId", "position");
+
+-- CreateIndex
+CREATE INDEX "AssistantThread_userId_updatedAt_idx" ON "AssistantThread"("userId", "updatedAt");
+
+-- CreateIndex
+CREATE INDEX "AssistantThread_opportunityId_idx" ON "AssistantThread"("opportunityId");
+
+-- CreateIndex
+CREATE INDEX "AssistantMessage_threadId_createdAt_idx" ON "AssistantMessage"("threadId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "EmailMessage_opportunityId_sentAt_idx" ON "EmailMessage"("opportunityId", "sentAt");
 
 -- CreateIndex
 CREATE INDEX "EmailMessage_threadId_idx" ON "EmailMessage"("threadId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "EmailMessage_orgId_gmailId_key" ON "EmailMessage"("orgId", "gmailId");
+CREATE UNIQUE INDEX "EmailMessage_userId_gmailId_key" ON "EmailMessage"("userId", "gmailId");
 
 -- CreateIndex
-CREATE INDEX "CalendarEvent_applicationId_startsAt_idx" ON "CalendarEvent"("applicationId", "startsAt");
+CREATE INDEX "EmailDraft_userId_status_idx" ON "EmailDraft"("userId", "status");
+
+-- CreateIndex
+CREATE INDEX "EmailDraft_opportunityId_idx" ON "EmailDraft"("opportunityId");
+
+-- CreateIndex
+CREATE INDEX "CalendarEvent_opportunityId_startsAt_idx" ON "CalendarEvent"("opportunityId", "startsAt");
 
 -- CreateIndex
 CREATE INDEX "CalendarEvent_startsAt_idx" ON "CalendarEvent"("startsAt");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "CalendarEvent_orgId_googleEventId_key" ON "CalendarEvent"("orgId", "googleEventId");
+CREATE UNIQUE INDEX "CalendarEvent_userId_googleEventId_key" ON "CalendarEvent"("userId", "googleEventId");
 
 -- CreateIndex
-CREATE INDEX "DriveFile_applicationId_idx" ON "DriveFile"("applicationId");
+CREATE INDEX "DriveFile_opportunityId_idx" ON "DriveFile"("opportunityId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "DriveFile_orgId_googleFileId_key" ON "DriveFile"("orgId", "googleFileId");
+CREATE UNIQUE INDEX "DriveFile_userId_googleFileId_key" ON "DriveFile"("userId", "googleFileId");
 
 -- CreateIndex
-CREATE INDEX "AutomationRule_orgId_trigger_enabled_idx" ON "AutomationRule"("orgId", "trigger", "enabled");
+CREATE INDEX "AutomationRule_userId_trigger_enabled_idx" ON "AutomationRule"("userId", "trigger", "enabled");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "EmailTemplate_orgId_name_key" ON "EmailTemplate"("orgId", "name");
+CREATE UNIQUE INDEX "AutomationRule_userId_name_key" ON "AutomationRule"("userId", "name");
 
 -- CreateIndex
-CREATE INDEX "Activity_orgId_occurredAt_idx" ON "Activity"("orgId", "occurredAt");
+CREATE INDEX "Activity_userId_occurredAt_idx" ON "Activity"("userId", "occurredAt");
 
 -- CreateIndex
-CREATE INDEX "Activity_applicationId_occurredAt_idx" ON "Activity"("applicationId", "occurredAt");
+CREATE INDEX "Activity_opportunityId_occurredAt_idx" ON "Activity"("opportunityId", "occurredAt");
 
 -- CreateIndex
-CREATE INDEX "SyncRun_orgId_provider_startedAt_idx" ON "SyncRun"("orgId", "provider", "startedAt");
-
--- AddForeignKey
-ALTER TABLE "User" ADD CONSTRAINT "User_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+CREATE INDEX "SyncRun_userId_provider_startedAt_idx" ON "SyncRun"("userId", "provider", "startedAt");
 
 -- AddForeignKey
 ALTER TABLE "GoogleAccount" ADD CONSTRAINT "GoogleAccount_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Pipeline" ADD CONSTRAINT "Pipeline_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Company" ADD CONSTRAINT "Company_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "PipelineStage" ADD CONSTRAINT "PipelineStage_pipelineId_fkey" FOREIGN KEY ("pipelineId") REFERENCES "Pipeline"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Contact" ADD CONSTRAINT "Contact_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Job" ADD CONSTRAINT "Job_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Contact" ADD CONSTRAINT "Contact_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "Company"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Job" ADD CONSTRAINT "Job_pipelineId_fkey" FOREIGN KEY ("pipelineId") REFERENCES "Pipeline"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "ProcessTemplate" ADD CONSTRAINT "ProcessTemplate_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Job" ADD CONSTRAINT "Job_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "TemplateStage" ADD CONSTRAINT "TemplateStage_templateId_fkey" FOREIGN KEY ("templateId") REFERENCES "ProcessTemplate"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Candidate" ADD CONSTRAINT "Candidate_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Opportunity" ADD CONSTRAINT "Opportunity_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Application" ADD CONSTRAINT "Application_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Opportunity" ADD CONSTRAINT "Opportunity_companyId_fkey" FOREIGN KEY ("companyId") REFERENCES "Company"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Application" ADD CONSTRAINT "Application_jobId_fkey" FOREIGN KEY ("jobId") REFERENCES "Job"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Opportunity" ADD CONSTRAINT "Opportunity_templateId_fkey" FOREIGN KEY ("templateId") REFERENCES "ProcessTemplate"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Application" ADD CONSTRAINT "Application_candidateId_fkey" FOREIGN KEY ("candidateId") REFERENCES "Candidate"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Opportunity" ADD CONSTRAINT "Opportunity_currentStageId_fkey" FOREIGN KEY ("currentStageId") REFERENCES "OpportunityStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Application" ADD CONSTRAINT "Application_currentStageId_fkey" FOREIGN KEY ("currentStageId") REFERENCES "ApplicationStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "OpportunityStage" ADD CONSTRAINT "OpportunityStage_opportunityId_fkey" FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "ApplicationStage" ADD CONSTRAINT "ApplicationStage_applicationId_fkey" FOREIGN KEY ("applicationId") REFERENCES "Application"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "StageTransition" ADD CONSTRAINT "StageTransition_opportunityId_fkey" FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "StageTransition" ADD CONSTRAINT "StageTransition_applicationId_fkey" FOREIGN KEY ("applicationId") REFERENCES "Application"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "StageTransition" ADD CONSTRAINT "StageTransition_fromStageId_fkey" FOREIGN KEY ("fromStageId") REFERENCES "OpportunityStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "StageTransition" ADD CONSTRAINT "StageTransition_fromStageId_fkey" FOREIGN KEY ("fromStageId") REFERENCES "ApplicationStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "StageTransition" ADD CONSTRAINT "StageTransition_toStageId_fkey" FOREIGN KEY ("toStageId") REFERENCES "OpportunityStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "StageTransition" ADD CONSTRAINT "StageTransition_toStageId_fkey" FOREIGN KEY ("toStageId") REFERENCES "ApplicationStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "Note" ADD CONSTRAINT "Note_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Note" ADD CONSTRAINT "Note_applicationId_fkey" FOREIGN KEY ("applicationId") REFERENCES "Application"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Note" ADD CONSTRAINT "Note_opportunityId_fkey" FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Note" ADD CONSTRAINT "Note_authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "Challenge" ADD CONSTRAINT "Challenge_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Scorecard" ADD CONSTRAINT "Scorecard_applicationId_fkey" FOREIGN KEY ("applicationId") REFERENCES "Application"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Challenge" ADD CONSTRAINT "Challenge_opportunityId_fkey" FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Scorecard" ADD CONSTRAINT "Scorecard_stageId_fkey" FOREIGN KEY ("stageId") REFERENCES "ApplicationStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "Challenge" ADD CONSTRAINT "Challenge_stageId_fkey" FOREIGN KEY ("stageId") REFERENCES "OpportunityStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Scorecard" ADD CONSTRAINT "Scorecard_authorId_fkey" FOREIGN KEY ("authorId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "ChallengeRequirement" ADD CONSTRAINT "ChallengeRequirement_challengeId_fkey" FOREIGN KEY ("challengeId") REFERENCES "Challenge"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "EmailMessage" ADD CONSTRAINT "EmailMessage_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "AssistantThread" ADD CONSTRAINT "AssistantThread_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "EmailMessage" ADD CONSTRAINT "EmailMessage_applicationId_fkey" FOREIGN KEY ("applicationId") REFERENCES "Application"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "AssistantThread" ADD CONSTRAINT "AssistantThread_opportunityId_fkey" FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "EmailMessage" ADD CONSTRAINT "EmailMessage_candidateId_fkey" FOREIGN KEY ("candidateId") REFERENCES "Candidate"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "AssistantThread" ADD CONSTRAINT "AssistantThread_challengeId_fkey" FOREIGN KEY ("challengeId") REFERENCES "Challenge"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "CalendarEvent" ADD CONSTRAINT "CalendarEvent_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "AssistantMessage" ADD CONSTRAINT "AssistantMessage_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "AssistantThread"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "CalendarEvent" ADD CONSTRAINT "CalendarEvent_applicationId_fkey" FOREIGN KEY ("applicationId") REFERENCES "Application"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "EmailMessage" ADD CONSTRAINT "EmailMessage_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "CalendarEvent" ADD CONSTRAINT "CalendarEvent_stageId_fkey" FOREIGN KEY ("stageId") REFERENCES "ApplicationStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "EmailMessage" ADD CONSTRAINT "EmailMessage_opportunityId_fkey" FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "DriveFile" ADD CONSTRAINT "DriveFile_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "EmailDraft" ADD CONSTRAINT "EmailDraft_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "DriveFile" ADD CONSTRAINT "DriveFile_applicationId_fkey" FOREIGN KEY ("applicationId") REFERENCES "Application"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "EmailDraft" ADD CONSTRAINT "EmailDraft_opportunityId_fkey" FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "DriveFile" ADD CONSTRAINT "DriveFile_candidateId_fkey" FOREIGN KEY ("candidateId") REFERENCES "Candidate"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+ALTER TABLE "CalendarEvent" ADD CONSTRAINT "CalendarEvent_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "AutomationRule" ADD CONSTRAINT "AutomationRule_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "CalendarEvent" ADD CONSTRAINT "CalendarEvent_opportunityId_fkey" FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "EmailTemplate" ADD CONSTRAINT "EmailTemplate_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "CalendarEvent" ADD CONSTRAINT "CalendarEvent_stageId_fkey" FOREIGN KEY ("stageId") REFERENCES "OpportunityStage"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Activity" ADD CONSTRAINT "Activity_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "DriveFile" ADD CONSTRAINT "DriveFile_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Activity" ADD CONSTRAINT "Activity_applicationId_fkey" FOREIGN KEY ("applicationId") REFERENCES "Application"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "DriveFile" ADD CONSTRAINT "DriveFile_opportunityId_fkey" FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "Activity" ADD CONSTRAINT "Activity_candidateId_fkey" FOREIGN KEY ("candidateId") REFERENCES "Candidate"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "AutomationRule" ADD CONSTRAINT "AutomationRule_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "SyncRun" ADD CONSTRAINT "SyncRun_orgId_fkey" FOREIGN KEY ("orgId") REFERENCES "Organization"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "Activity" ADD CONSTRAINT "Activity_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Activity" ADD CONSTRAINT "Activity_opportunityId_fkey" FOREIGN KEY ("opportunityId") REFERENCES "Opportunity"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "SyncRun" ADD CONSTRAINT "SyncRun_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 

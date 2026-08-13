@@ -7,34 +7,35 @@ import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth";
 import { logActivity } from "@/server/activity";
 import {
-  createApplication,
+  createOpportunity,
   moveToStage,
   advanceStage,
   addCustomStage,
   skipStage,
   restoreStage,
   reorderStages,
-  setApplicationStatus,
-} from "@/server/applications";
+  setOpportunityStatus,
+  setNextAction,
+} from "@/server/opportunities";
 import { enqueueAccountSync } from "@/server/queue";
 import { syncAccount } from "@/server/sync";
-import { sendEmail } from "@/server/sync/gmail";
-import { scheduleInterview } from "@/server/sync/calendar";
+import { sendDraft } from "@/server/sync/gmail";
+import { sendMessage } from "@/server/ai/agent";
 import type { StageType } from "@prisma/client";
 
-/** Confirms the record belongs to the caller's org before mutating it. */
-async function ownedApplication(applicationId: string) {
+/** Confirms the record is yours before mutating it. */
+async function ownedOpportunity(opportunityId: string) {
   const user = await requireUser();
-  const application = await prisma.application.findFirst({
-    where: { id: applicationId, orgId: user.orgId },
+  const opportunity = await prisma.opportunity.findFirst({
+    where: { id: opportunityId, userId: user.id },
   });
-  if (!application) throw new Error("Application not found");
-  return { user, application };
+  if (!opportunity) throw new Error("Process not found");
+  return { user, opportunity };
 }
 
-function refreshApplication(applicationId: string) {
-  revalidatePath(`/applications/${applicationId}`);
-  revalidatePath("/jobs", "layout");
+function refresh(opportunityId?: string) {
+  if (opportunityId) revalidatePath(`/processes/${opportunityId}`);
+  revalidatePath("/processes");
   revalidatePath("/");
 }
 
@@ -43,46 +44,61 @@ function refreshApplication(applicationId: string) {
 // ---------------------------------------------------------------------------
 
 export async function moveStageAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
+  const opportunityId = String(formData.get("opportunityId"));
   const stageId = String(formData.get("stageId"));
-  const { user } = await ownedApplication(applicationId);
+  await ownedOpportunity(opportunityId);
 
   await moveToStage({
-    applicationId,
+    opportunityId,
     target: { stageId },
-    actor: { type: "USER", id: user.id },
+    actor: { type: "USER" },
     reason: "Moved manually",
   });
-  refreshApplication(applicationId);
+  refresh(opportunityId);
 }
 
 export async function advanceStageAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
-  const { user } = await ownedApplication(applicationId);
+  const opportunityId = String(formData.get("opportunityId"));
+  await ownedOpportunity(opportunityId);
 
   await advanceStage({
-    applicationId,
-    actor: { type: "USER", id: user.id },
+    opportunityId,
+    actor: { type: "USER" },
     reason: "Advanced manually",
   });
-  refreshApplication(applicationId);
+  refresh(opportunityId);
 }
 
 export async function setStatusAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
+  const opportunityId = String(formData.get("opportunityId"));
   const status = z
-    .enum(["ACTIVE", "ON_HOLD", "HIRED", "REJECTED", "WITHDRAWN"])
+    .enum(["ACTIVE", "ON_HOLD", "OFFER", "ACCEPTED", "REJECTED", "WITHDRAWN", "GHOSTED"])
     .parse(formData.get("status"));
   const reason = String(formData.get("reason") ?? "") || undefined;
 
-  const { user } = await ownedApplication(applicationId);
-  await setApplicationStatus({
-    applicationId,
+  await ownedOpportunity(opportunityId);
+  await setOpportunityStatus({
+    opportunityId,
     status,
-    actor: { type: "USER", id: user.id },
+    actor: { type: "USER" },
     reason,
   });
-  refreshApplication(applicationId);
+  refresh(opportunityId);
+}
+
+export async function setNextActionAction(formData: FormData) {
+  const opportunityId = String(formData.get("opportunityId"));
+  const action = String(formData.get("action") ?? "").trim();
+  const dueRaw = String(formData.get("dueAt") ?? "").trim();
+
+  await ownedOpportunity(opportunityId);
+  await setNextAction({
+    opportunityId,
+    action: action || null,
+    dueAt: dueRaw ? new Date(dueRaw) : null,
+    actor: { type: "USER" },
+  });
+  refresh(opportunityId);
 }
 
 // ---------------------------------------------------------------------------
@@ -90,63 +106,52 @@ export async function setStatusAction(formData: FormData) {
 // ---------------------------------------------------------------------------
 
 export async function addStageAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
+  const opportunityId = String(formData.get("opportunityId"));
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return;
 
   const type = (String(formData.get("type") ?? "CUSTOM") || "CUSTOM") as StageType;
   const afterStageId = String(formData.get("afterStageId") ?? "") || null;
-  const slaRaw = String(formData.get("slaDays") ?? "").trim();
 
-  const { user } = await ownedApplication(applicationId);
+  await ownedOpportunity(opportunityId);
   await addCustomStage({
-    applicationId,
+    opportunityId,
     name,
     type,
     afterStageId,
-    slaDays: slaRaw ? Number(slaRaw) : null,
-    actor: { type: "USER", id: user.id },
+    actor: { type: "USER" },
   });
-  refreshApplication(applicationId);
+  refresh(opportunityId);
 }
 
 export async function skipStageAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
+  const opportunityId = String(formData.get("opportunityId"));
   const stageId = String(formData.get("stageId"));
   const reason = String(formData.get("reason") ?? "") || undefined;
 
-  const { user } = await ownedApplication(applicationId);
-  await skipStage({
-    applicationId,
-    stageId,
-    reason,
-    actor: { type: "USER", id: user.id },
-  });
-  refreshApplication(applicationId);
+  await ownedOpportunity(opportunityId);
+  await skipStage({ opportunityId, stageId, reason, actor: { type: "USER" } });
+  refresh(opportunityId);
 }
 
 export async function restoreStageAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
+  const opportunityId = String(formData.get("opportunityId"));
   const stageId = String(formData.get("stageId"));
 
-  const { user } = await ownedApplication(applicationId);
-  await restoreStage({
-    applicationId,
-    stageId,
-    actor: { type: "USER", id: user.id },
-  });
-  refreshApplication(applicationId);
+  await ownedOpportunity(opportunityId);
+  await restoreStage({ opportunityId, stageId, actor: { type: "USER" } });
+  refresh(opportunityId);
 }
 
 /** Moves one stage up or down by swapping it with its neighbour. */
 export async function moveStageOrderAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
+  const opportunityId = String(formData.get("opportunityId"));
   const stageId = String(formData.get("stageId"));
   const direction = String(formData.get("direction")) === "up" ? -1 : 1;
 
-  const { user } = await ownedApplication(applicationId);
-  const stages = await prisma.applicationStage.findMany({
-    where: { applicationId },
+  await ownedOpportunity(opportunityId);
+  const stages = await prisma.opportunityStage.findMany({
+    where: { opportunityId },
     orderBy: { position: "asc" },
   });
 
@@ -158,150 +163,332 @@ export async function moveStageOrderAction(formData: FormData) {
   [reordered[index], reordered[target]] = [reordered[target], reordered[index]];
 
   await reorderStages({
-    applicationId,
+    opportunityId,
     orderedStageIds: reordered.map((s) => s.id),
-    actor: { type: "USER", id: user.id },
+    actor: { type: "USER" },
   });
-  refreshApplication(applicationId);
-}
-
-// ---------------------------------------------------------------------------
-// Notes & scorecards
-// ---------------------------------------------------------------------------
-
-export async function addNoteAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
-  const body = String(formData.get("body") ?? "").trim();
-  if (!body) return;
-
-  const { user, application } = await ownedApplication(applicationId);
-  await prisma.note.create({
-    data: { applicationId, authorId: user.id, body },
-  });
-  await logActivity({
-    orgId: user.orgId,
-    applicationId,
-    candidateId: application.candidateId,
-    type: "NOTE_ADDED",
-    title: `${user.name} added a note`,
-    body: body.slice(0, 300),
-    actorType: "USER",
-    actorId: user.id,
-  });
-  refreshApplication(applicationId);
-}
-
-export async function addScorecardAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
-  const verdict = z
-    .enum(["STRONG_YES", "YES", "NEUTRAL", "NO", "STRONG_NO"])
-    .parse(formData.get("verdict"));
-  const strengths = String(formData.get("strengths") ?? "").trim() || null;
-  const concerns = String(formData.get("concerns") ?? "").trim() || null;
-
-  const { user, application } = await ownedApplication(applicationId);
-  await prisma.scorecard.create({
-    data: {
-      applicationId,
-      stageId: application.currentStageId,
-      authorId: user.id,
-      verdict,
-      strengths,
-      concerns,
-    },
-  });
-  await logActivity({
-    orgId: user.orgId,
-    applicationId,
-    candidateId: application.candidateId,
-    type: "SCORECARD_ADDED",
-    title: `${user.name} submitted a scorecard: ${verdict.replace("_", " ").toLowerCase()}`,
-    actorType: "USER",
-    actorId: user.id,
-  });
-  refreshApplication(applicationId);
+  refresh(opportunityId);
 }
 
 // ---------------------------------------------------------------------------
 // Creating records
 // ---------------------------------------------------------------------------
 
-export async function createJobAction(formData: FormData) {
+export async function createProcessAction(formData: FormData) {
   const user = await requireUser();
-  const title = String(formData.get("title") ?? "").trim();
-  const pipelineId = String(formData.get("pipelineId") ?? "");
-  if (!title || !pipelineId) return;
+  const companyName = String(formData.get("companyName") ?? "").trim();
+  const roleTitle = String(formData.get("roleTitle") ?? "").trim();
+  const templateId = String(formData.get("templateId") ?? "");
+  if (!companyName || !roleTitle || !templateId) return;
 
-  const pipeline = await prisma.pipeline.findFirst({
-    where: { id: pipelineId, orgId: user.orgId },
+  const template = await prisma.processTemplate.findFirst({
+    where: { id: templateId, userId: user.id },
   });
-  if (!pipeline) throw new Error("Pipeline not found");
+  if (!template) throw new Error("Flow not found");
 
-  const job = await prisma.job.create({
-    data: {
-      orgId: user.orgId,
-      pipelineId,
-      ownerId: user.id,
-      title,
-      department: String(formData.get("department") ?? "") || null,
+  const domainRaw = String(formData.get("companyDomain") ?? "").trim().toLowerCase();
+  const domains = domainRaw
+    ? domainRaw.split(/[,\s]+/).map((d) => d.replace(/^https?:\/\//, "").replace(/\/.*$/, ""))
+    : [];
+
+  const company = await prisma.company.upsert({
+    where: { userId_name: { userId: user.id, name: companyName } },
+    create: { userId: user.id, name: companyName, domains },
+    update: domains.length > 0 ? { domains } : {},
+  });
+
+  const opportunity = await createOpportunity({
+    userId: user.id,
+    companyId: company.id,
+    templateId,
+    roleTitle,
+    actor: { type: "USER" },
+    details: {
       location: String(formData.get("location") ?? "") || null,
-      employmentType: String(formData.get("employmentType") ?? "") || null,
-      description: String(formData.get("description") ?? "") || null,
-      openings: Number(formData.get("openings") ?? 1) || 1,
-      status: "OPEN",
+      jobPostUrl: String(formData.get("jobPostUrl") ?? "") || null,
+      source: String(formData.get("source") ?? "") || null,
+      priority: (String(formData.get("priority") ?? "MEDIUM") || "MEDIUM") as
+        | "DREAM"
+        | "HIGH"
+        | "MEDIUM"
+        | "LOW",
     },
   });
 
-  revalidatePath("/jobs");
-  redirect(`/jobs/${job.id}`);
+  revalidatePath("/processes");
+  redirect(`/processes/${opportunity.id}`);
 }
 
-export async function addCandidateAction(formData: FormData) {
+export async function addContactAction(formData: FormData) {
   const user = await requireUser();
-  const fullName = String(formData.get("fullName") ?? "").trim();
+  const opportunityId = String(formData.get("opportunityId"));
+  const name = String(formData.get("name") ?? "").trim();
   const email = String(formData.get("email") ?? "").trim().toLowerCase();
-  const jobId = String(formData.get("jobId") ?? "");
-  if (!fullName || !email) return;
+  if (!name || !email) return;
 
-  const candidate = await prisma.candidate.upsert({
-    where: { orgId_email: { orgId: user.orgId, email } },
+  const { opportunity } = await ownedOpportunity(opportunityId);
+
+  await prisma.contact.upsert({
+    where: { userId_email: { userId: user.id, email } },
     create: {
-      orgId: user.orgId,
-      fullName,
+      userId: user.id,
+      companyId: opportunity.companyId,
+      name,
       email,
-      phone: String(formData.get("phone") ?? "") || null,
-      linkedinUrl: String(formData.get("linkedinUrl") ?? "") || null,
-      headline: String(formData.get("headline") ?? "") || null,
-      source: String(formData.get("source") ?? "") || "Manual",
+      role: (String(formData.get("role") ?? "RECRUITER") || "RECRUITER") as
+        | "RECRUITER"
+        | "HIRING_MANAGER"
+        | "INTERVIEWER"
+        | "REFERRAL"
+        | "OTHER",
+      title: String(formData.get("title") ?? "") || null,
     },
-    update: { fullName },
+    update: { companyId: opportunity.companyId, name },
   });
 
-  if (jobId) {
-    const job = await prisma.job.findFirst({
-      where: { id: jobId, orgId: user.orgId },
+  refresh(opportunityId);
+}
+
+export async function addNoteAction(formData: FormData) {
+  const opportunityId = String(formData.get("opportunityId"));
+  const body = String(formData.get("body") ?? "").trim();
+  if (!body) return;
+
+  const { user } = await ownedOpportunity(opportunityId);
+  await prisma.note.create({ data: { userId: user.id, opportunityId, body } });
+  await logActivity({
+    userId: user.id,
+    opportunityId,
+    type: "NOTE_ADDED",
+    title: "You added a note",
+    body: body.slice(0, 300),
+    actorType: "USER",
+  });
+  refresh(opportunityId);
+}
+
+// ---------------------------------------------------------------------------
+// Challenges
+// ---------------------------------------------------------------------------
+
+export async function createChallengeAction(formData: FormData) {
+  const opportunityId = String(formData.get("opportunityId"));
+  const title = String(formData.get("title") ?? "").trim();
+  if (!title) return;
+
+  const { user, opportunity } = await ownedOpportunity(opportunityId);
+  const deadlineRaw = String(formData.get("deadline") ?? "").trim();
+
+  const challenge = await prisma.challenge.create({
+    data: {
+      userId: user.id,
+      opportunityId,
+      stageId: opportunity.currentStageId,
+      title,
+      brief: String(formData.get("brief") ?? "") || null,
+      briefSource: String(formData.get("briefSource") ?? "") || null,
+      deadline: deadlineRaw ? new Date(deadlineRaw) : null,
+    },
+  });
+
+  await logActivity({
+    userId: user.id,
+    opportunityId,
+    type: "CHALLENGE_CREATED",
+    title: `Challenge added: ${title}`,
+    actorType: "USER",
+  });
+
+  revalidatePath("/challenges");
+  redirect(`/challenges/${challenge.id}`);
+}
+
+async function ownedChallenge(challengeId: string) {
+  const user = await requireUser();
+  const challenge = await prisma.challenge.findFirst({
+    where: { id: challengeId, userId: user.id },
+  });
+  if (!challenge) throw new Error("Challenge not found");
+  return { user, challenge };
+}
+
+export async function updateChallengeAction(formData: FormData) {
+  const challengeId = String(formData.get("challengeId"));
+  const { challenge } = await ownedChallenge(challengeId);
+
+  const deadlineRaw = String(formData.get("deadline") ?? "").trim();
+  const statusRaw = String(formData.get("status") ?? "");
+
+  await prisma.challenge.update({
+    where: { id: challenge.id },
+    data: {
+      brief: formData.has("brief") ? String(formData.get("brief") ?? "") || null : undefined,
+      plan: formData.has("plan") ? String(formData.get("plan") ?? "") || null : undefined,
+      notes: formData.has("notes") ? String(formData.get("notes") ?? "") || null : undefined,
+      repoUrl: formData.has("repoUrl") ? String(formData.get("repoUrl") ?? "") || null : undefined,
+      submissionUrl: formData.has("submissionUrl")
+        ? String(formData.get("submissionUrl") ?? "") || null
+        : undefined,
+      deadline: formData.has("deadline") ? (deadlineRaw ? new Date(deadlineRaw) : null) : undefined,
+      status: statusRaw
+        ? (statusRaw as
+            | "NOT_STARTED"
+            | "PLANNING"
+            | "IN_PROGRESS"
+            | "READY_FOR_REVIEW"
+            | "SUBMITTED"
+            | "PASSED"
+            | "FAILED")
+        : undefined,
+      submittedAt: statusRaw === "SUBMITTED" ? new Date() : undefined,
+    },
+  });
+
+  revalidatePath(`/challenges/${challenge.id}`);
+  revalidatePath("/challenges");
+}
+
+export async function toggleRequirementAction(formData: FormData) {
+  const requirementId = String(formData.get("requirementId"));
+  const user = await requireUser();
+
+  const requirement = await prisma.challengeRequirement.findFirst({
+    where: { id: requirementId, challenge: { userId: user.id } },
+  });
+  if (!requirement) return;
+
+  await prisma.challengeRequirement.update({
+    where: { id: requirement.id },
+    data: { done: !requirement.done },
+  });
+  revalidatePath(`/challenges/${requirement.challengeId}`);
+}
+
+export async function addRequirementAction(formData: FormData) {
+  const challengeId = String(formData.get("challengeId"));
+  const text = String(formData.get("text") ?? "").trim();
+  if (!text) return;
+
+  const { challenge } = await ownedChallenge(challengeId);
+  const last = await prisma.challengeRequirement.findFirst({
+    where: { challengeId: challenge.id },
+    orderBy: { position: "desc" },
+  });
+
+  await prisma.challengeRequirement.create({
+    data: {
+      challengeId: challenge.id,
+      text,
+      position: (last?.position ?? -1) + 1,
+      fromBrief: false,
+    },
+  });
+  revalidatePath(`/challenges/${challenge.id}`);
+}
+
+// ---------------------------------------------------------------------------
+// Email drafts — approve and send is always a human action
+// ---------------------------------------------------------------------------
+
+export async function updateDraftAction(formData: FormData) {
+  const draftId = String(formData.get("draftId"));
+  const user = await requireUser();
+
+  const draft = await prisma.emailDraft.findFirst({
+    where: { id: draftId, userId: user.id, status: "DRAFT" },
+  });
+  if (!draft) return;
+
+  await prisma.emailDraft.update({
+    where: { id: draft.id },
+    data: {
+      subject: String(formData.get("subject") ?? draft.subject),
+      body: String(formData.get("body") ?? draft.body),
+      toEmail: String(formData.get("toEmail") ?? draft.toEmail),
+    },
+  });
+  revalidatePath("/drafts");
+}
+
+export async function sendDraftAction(formData: FormData) {
+  const draftId = String(formData.get("draftId"));
+  const user = await requireUser();
+
+  const draft = await prisma.emailDraft.findFirst({
+    where: { id: draftId, userId: user.id },
+  });
+  if (!draft) return;
+
+  const account = await prisma.googleAccount.findUnique({ where: { userId: user.id } });
+  if (!account) throw new Error("Connect Google before sending");
+
+  await sendDraft({ account, userId: user.id, draftId: draft.id });
+
+  revalidatePath("/drafts");
+  refresh(draft.opportunityId ?? undefined);
+}
+
+export async function discardDraftAction(formData: FormData) {
+  const draftId = String(formData.get("draftId"));
+  const user = await requireUser();
+
+  await prisma.emailDraft.updateMany({
+    where: { id: draftId, userId: user.id, status: "DRAFT" },
+    data: { status: "DISCARDED" },
+  });
+  revalidatePath("/drafts");
+}
+
+// ---------------------------------------------------------------------------
+// Assistant
+// ---------------------------------------------------------------------------
+
+export type AssistantState = { error?: string; ok?: boolean };
+
+/**
+ * Sends one message to the assistant. Bound with useActionState so the panel
+ * can show a pending state while the tool loop runs.
+ */
+export async function askAssistantAction(
+  _prev: AssistantState,
+  formData: FormData,
+): Promise<AssistantState> {
+  const user = await requireUser();
+  const message = String(formData.get("message") ?? "").trim();
+  if (!message) return {};
+
+  const opportunityId = String(formData.get("opportunityId") ?? "") || null;
+  const challengeId = String(formData.get("challengeId") ?? "") || null;
+
+  // One thread per opportunity / challenge keeps the context tight.
+  let thread = await prisma.assistantThread.findFirst({
+    where: { userId: user.id, opportunityId, challengeId },
+    orderBy: { updatedAt: "desc" },
+  });
+  if (!thread) {
+    thread = await prisma.assistantThread.create({
+      data: { userId: user.id, opportunityId, challengeId },
     });
-    if (job) {
-      const application = await createApplication({
-        orgId: user.orgId,
-        jobId,
-        candidateId: candidate.id,
-        actor: { type: "USER", id: user.id },
-      });
-      revalidatePath(`/jobs/${jobId}`);
-      revalidatePath("/candidates");
-      redirect(`/applications/${application.id}`);
-    }
   }
 
-  revalidatePath("/candidates");
+  try {
+    await sendMessage({ threadId: thread.id, userId: user.id, message });
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "The assistant failed" };
+  }
+
+  if (opportunityId) revalidatePath(`/processes/${opportunityId}`);
+  if (challengeId) revalidatePath(`/challenges/${challengeId}`);
+  revalidatePath("/drafts");
+  revalidatePath("/");
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
-// Pipelines & automations
+// Flows & automations
 // ---------------------------------------------------------------------------
 
-export async function createPipelineAction(formData: FormData) {
+export async function createFlowAction(formData: FormData) {
   const user = await requireUser();
   const name = String(formData.get("name") ?? "").trim();
   if (!name) return;
@@ -312,30 +499,31 @@ export async function createPipelineAction(formData: FormData) {
     .filter(Boolean);
   if (stageNames.length === 0) return;
 
-  const pipeline = await prisma.pipeline.create({
+  const template = await prisma.processTemplate.create({
     data: {
-      orgId: user.orgId,
+      userId: user.id,
       name,
       description: String(formData.get("description") ?? "") || null,
     },
   });
 
-  await prisma.pipelineStage.createMany({
+  await prisma.templateStage.createMany({
     data: stageNames.map((stageName, index) => ({
-      pipelineId: pipeline.id,
+      templateId: template.id,
       name: stageName,
-      key: stageName
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "") || `stage_${index}`,
-      // The last step of a hand-written flow is the hire; everything before it
-      // is a generic step the recruiter can retype later.
-      type: index === stageNames.length - 1 ? "HIRED" : "CUSTOM",
+      key:
+        stageName
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "_")
+          .replace(/^_+|_+$/g, "") || `stage_${index}`,
+      // The last step of a hand-written flow is the acceptance; everything
+      // before it is a generic step you can retype later.
+      type: index === stageNames.length - 1 ? "ACCEPTED" : "CUSTOM",
       position: index,
     })),
   });
 
-  revalidatePath("/pipelines");
+  revalidatePath("/flows");
 }
 
 export async function toggleRuleAction(formData: FormData) {
@@ -343,7 +531,7 @@ export async function toggleRuleAction(formData: FormData) {
   const ruleId = String(formData.get("ruleId"));
 
   const rule = await prisma.automationRule.findFirst({
-    where: { id: ruleId, orgId: user.orgId },
+    where: { id: ruleId, userId: user.id },
   });
   if (!rule) return;
 
@@ -355,127 +543,18 @@ export async function toggleRuleAction(formData: FormData) {
 }
 
 // ---------------------------------------------------------------------------
-// Outbound Google actions
-// ---------------------------------------------------------------------------
-
-/** Fills {{candidate}}, {{job}}, {{company}} and {{recruiter}} placeholders. */
-function renderTemplate(
-  text: string,
-  vars: { candidate: string; job: string; company: string; recruiter: string },
-): string {
-  return text.replace(/\{\{\s*(\w+)\s*\}\}/g, (match, key: string) =>
-    key in vars ? vars[key as keyof typeof vars] : match,
-  );
-}
-
-export async function sendEmailAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
-  const { user, application } = await ownedApplication(applicationId);
-
-  const account = await prisma.googleAccount.findUnique({
-    where: { userId: user.id },
-  });
-  if (!account) throw new Error("Connect Google before sending email");
-
-  const full = await prisma.application.findUniqueOrThrow({
-    where: { id: applicationId },
-    include: { candidate: true, job: true },
-  });
-
-  const vars = {
-    candidate: full.candidate.fullName,
-    job: full.job.title,
-    company: user.org.name,
-    recruiter: user.name,
-  };
-
-  let subject = String(formData.get("subject") ?? "").trim();
-  let body = String(formData.get("body") ?? "").trim();
-
-  // A chosen template supplies whatever the recruiter left blank.
-  const templateId = String(formData.get("templateId") ?? "");
-  if (templateId) {
-    const template = await prisma.emailTemplate.findFirst({
-      where: { id: templateId, orgId: user.orgId },
-    });
-    if (template) {
-      subject ||= renderTemplate(template.subject, vars);
-      body ||= renderTemplate(template.body, vars);
-    }
-  }
-  if (!subject || !body) return;
-
-  await sendEmail({
-    account,
-    orgId: user.orgId,
-    to: full.candidate.email,
-    subject: renderTemplate(subject, vars),
-    body: renderTemplate(body, vars),
-    threadId: application.emailThreadId,
-    applicationId,
-    candidateId: full.candidateId,
-    actorId: user.id,
-  });
-
-  refreshApplication(applicationId);
-}
-
-export async function scheduleInterviewAction(formData: FormData) {
-  const applicationId = String(formData.get("applicationId"));
-  const { user } = await ownedApplication(applicationId);
-
-  const account = await prisma.googleAccount.findUnique({
-    where: { userId: user.id },
-  });
-  if (!account) throw new Error("Connect Google before scheduling");
-
-  const startsAtRaw = String(formData.get("startsAt") ?? "");
-  const startsAt = new Date(startsAtRaw);
-  if (Number.isNaN(startsAt.getTime())) return;
-
-  const full = await prisma.application.findUniqueOrThrow({
-    where: { id: applicationId },
-    include: { candidate: true, currentStage: true },
-  });
-
-  const title =
-    String(formData.get("title") ?? "").trim() ||
-    `${full.currentStage?.name ?? "Interview"} — ${full.candidate.fullName}`;
-
-  await scheduleInterview({
-    account,
-    orgId: user.orgId,
-    applicationId,
-    title,
-    startsAt,
-    durationMinutes: Number(formData.get("durationMinutes") ?? 60) || 60,
-    attendeeEmails: [full.candidate.email, user.email],
-    description: String(formData.get("description") ?? "") || undefined,
-    actorId: user.id,
-  });
-
-  refreshApplication(applicationId);
-}
-
-// ---------------------------------------------------------------------------
 // Sync
 // ---------------------------------------------------------------------------
 
-/**
- * Triggers a sync. Prefers the worker queue; if Redis is unavailable it runs
- * inline so the button still does something useful.
- */
 export async function syncNowAction() {
   const user = await requireUser();
-
-  const account = await prisma.googleAccount.findUnique({
-    where: { userId: user.id },
-  });
+  const account = await prisma.googleAccount.findUnique({ where: { userId: user.id } });
   if (!account) return;
 
   try {
     await enqueueAccountSync(user.id);
   } catch {
+    // Redis unavailable — run it inline so the button still does something.
     await syncAccount(user.id);
   }
 
@@ -485,14 +564,24 @@ export async function syncNowAction() {
 
 export async function toggleSyncAction() {
   const user = await requireUser();
-  const account = await prisma.googleAccount.findUnique({
-    where: { userId: user.id },
-  });
+  const account = await prisma.googleAccount.findUnique({ where: { userId: user.id } });
   if (!account) return;
 
   await prisma.googleAccount.update({
     where: { id: account.id },
     data: { syncEnabled: !account.syncEnabled },
+  });
+  revalidatePath("/integrations");
+}
+
+export async function updateProfileAction(formData: FormData) {
+  const user = await requireUser();
+  await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      profile: String(formData.get("profile") ?? "") || null,
+      headline: String(formData.get("headline") ?? "") || null,
+    },
   });
   revalidatePath("/integrations");
 }

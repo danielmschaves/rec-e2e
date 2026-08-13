@@ -1,10 +1,13 @@
 /**
  * Browser smoke test.
  *
- * Signs in via dev login, creates its own candidate (so the seeded demo data
- * stays pristine), then exercises the flows that matter: personalising a
- * candidate's process, advancing a stage, and adding a note. Captures a
- * screenshot of every screen.
+ * Signs in via dev login, creates its own process (so the seeded demo data
+ * stays pristine), then exercises what matters: personalising a company's
+ * process, adding a challenge, and walking every screen. Captures a screenshot
+ * of each.
+ *
+ * Does not exercise the assistant — that needs a real API key. See
+ * scripts/assistant-check.ts for that path.
  *
  * Usage: node scripts/smoke.mjs [baseUrl]
  */
@@ -61,7 +64,7 @@ page.on("console", (msg) => {
 page.on("pageerror", (err) => problems.push(`page error: ${err.message}`));
 
 const stamp = Date.now();
-const candidateName = `Smoke Tester ${stamp}`;
+const companyName = `Smoke Co ${stamp}`;
 
 try {
   console.log("1. Login page");
@@ -69,65 +72,90 @@ try {
   await shot(page, "login");
 
   console.log("2. Dev login");
-  await page.getByRole("button", { name: /Alex Rivera/ }).click();
+  await page.getByRole("button", { name: /you@example\.com/ }).click();
   await page.waitForURL(`${BASE}/`, { timeout: 20000 });
-  await expectText(page, "Open roles", "dashboard rendered");
+  await expectText(page, "Live processes", "dashboard rendered");
   await shot(page, "dashboard");
 
-  console.log("3. Jobs list");
-  await go(page, "/jobs");
-  await expectText(page, "Senior Backend Engineer", "jobs list rendered");
-  await shot(page, "jobs");
+  console.log("3. Processes list");
+  await go(page, "/processes");
+  await expectText(page, "Nimbus Data", "processes list rendered");
+  await shot(page, "processes");
 
-  console.log("4. Job board");
-  await page.getByRole("link", { name: /Senior Backend Engineer/ }).first().click();
-  await expectText(page, "Add a candidate", "job board rendered");
-  await shot(page, "job-board");
+  console.log("4. Track a new process");
+  await page.fill('input[name="companyName"]', companyName);
+  await page.fill('input[name="roleTitle"]', "Principal Engineer");
+  await page.fill('input[name="companyDomain"]', `smoke-${stamp}.example`);
+  await page.selectOption('select[name="templateId"]', { label: "Standard engineering loop" });
+  await page.getByRole("button", { name: "Start tracking" }).click();
+  await page.waitForURL(/\/processes\/[^/]+$/, { timeout: 20000 });
+  await expectText(page, "Their process", "process page rendered");
+  await expectText(page, "Standard ·", "new process starts on the standard flow");
+  const processUrl = page.url();
+  await shot(page, "process-standard");
 
-  console.log("5. Add a candidate");
-  await page.fill('input[name="fullName"]', candidateName);
-  await page.fill('input[name="email"]', `smoke-${stamp}@example.com`);
-  await page.fill('input[name="headline"]', "Created by the smoke test");
-  await page.getByRole("button", { name: "Add to pipeline" }).click();
-  await page.waitForURL(/\/applications\//, { timeout: 20000 });
-  await expectText(page, "Hiring flow", "application page rendered");
-  await expectText(page, "Standard ·", "new application starts on the standard flow");
-  const applicationUrl = page.url();
-  await shot(page, "application-standard");
-
-  console.log("6. Personalise — add a custom step");
-  await page.fill('input[name="name"]', "Architecture Deep Dive");
+  console.log("5. Personalise — they added a step");
+  await page.fill('input[name="name"]', "Pairing session");
   await page.getByRole("button", { name: "Add step" }).click();
-  await expectText(page, "Architecture Deep Dive", "custom stage appears in the tracker");
-  await expectText(page, "Personalised", "application is marked personalised");
-  await shot(page, "application-personalised");
+  await expectText(page, "Pairing session", "custom step appears in the tracker");
+  await expectText(page, "Diverged from your flow", "process is marked as diverged");
+  await shot(page, "process-personalised");
 
-  console.log("7. Personalise — skip a stage");
-  const assessmentRow = page
+  console.log("6. Personalise — they skipped a step");
+  const takeHomeRow = page.locator("li").filter({ hasText: "Take-home" }).first();
+  await takeHomeRow.hover();
+  await takeHomeRow.locator('button[title="They skipped this step"]').click();
+  await expectText(page, 'Skipped "Take-home"', "skip is recorded on the timeline");
+  await shot(page, "process-skipped");
+
+  console.log("7. Advance the stage");
+  await page.getByRole("button", { name: /^Next stage$/ }).click();
+  await expectText(page, "Applied", "advancing moved the stage");
+  await shot(page, "process-advanced");
+
+  console.log("8. Record a next action");
+  await page.goto(processUrl, { waitUntil: "domcontentloaded" });
+  await page.fill('input[name="action"]', `Chase them ${stamp}`);
+  await page.getByRole("button", { name: "Save" }).first().click();
+  // It renders back into an input's value, so assert the value, not page text.
+  try {
+    await page
+      .locator(`input[name="action"][value="Chase them ${stamp}"]`)
+      .first()
+      .waitFor({ state: "attached", timeout: 15000 });
+    console.log("  ok: next action saved");
+  } catch {
+    problems.push("next action was not persisted back into the form");
+  }
+
+  console.log("9. Add a challenge");
+  await page.fill('input[name="title"]', "Smoke take-home");
+  await page.fill('textarea[name="brief"]', "Build a small service. Include tests.");
+  await page.getByRole("button", { name: "Add challenge" }).click();
+  await page.waitForURL(/\/challenges\/[^/]+$/, { timeout: 20000 });
+  await expectText(page, "Requirements", "challenge workspace rendered");
+  await expectText(page, "The brief", "brief section rendered");
+  await shot(page, "challenge");
+
+  console.log("10. Add a requirement and tick it");
+  await page.fill('input[name="text"]', "Ship a README");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expectText(page, "Ship a README", "requirement added");
+  await page
     .locator("li")
-    .filter({ hasText: "Take-home Assessment" })
-    .first();
-  await assessmentRow.hover();
-  await assessmentRow.locator('button[title="Skip for this candidate"]').click();
-  await expectText(page, 'Skipped stage "Take-home Assessment"', "skip is recorded on the timeline");
-  await shot(page, "application-skipped");
+    .filter({ hasText: "Ship a README" })
+    .first()
+    .locator('button[aria-label="Mark done"]')
+    .click();
+  await expectText(page, "1/1 must-haves", "requirement counted as done");
+  await shot(page, "challenge-progress");
 
-  console.log("8. Advance the stage");
-  await page.getByRole("button", { name: /^Advance$/ }).click();
-  await expectText(page, "Moved from", "advancing recorded a transition");
-  await shot(page, "application-advanced");
-
-  console.log("9. Add a note");
-  await page.goto(applicationUrl, { waitUntil: "domcontentloaded" });
-  await page.fill('textarea[name="body"]', `Smoke note ${stamp}`);
-  await page.getByRole("button", { name: "Add note" }).click();
-  await expectText(page, `Smoke note ${stamp}`, "note appears");
-
-  console.log("10. Remaining screens");
+  console.log("11. Remaining screens");
   for (const [path, name, marker] of [
-    ["/candidates", "candidates", candidateName],
-    ["/pipelines", "pipelines", "Standard Engineering Hire"],
-    ["/automations", "automations", "When an event is booked"],
+    ["/challenges", "challenges", "Event ingestion service"],
+    ["/drafts", "drafts", "has no ability to send"],
+    ["/flows", "flows", "Standard engineering loop"],
+    ["/automations", "automations", "When a company emails you"],
     ["/integrations", "integrations", "Google Workspace"],
   ]) {
     await go(page, path);

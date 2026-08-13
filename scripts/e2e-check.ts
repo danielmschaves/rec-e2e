@@ -1,21 +1,25 @@
 /**
- * End-to-end check of the process engine.
+ * End-to-end check of the process engine, automation rules and assistant tools.
  *
- * Creates a throwaway job + candidate, drives an application through the
- * lifecycle — standard flow, personalization, and each automation trigger the
- * Google sync emits — asserting the state after every step, then deletes
- * everything it created.
+ * Creates a throwaway company + opportunity, drives it through the lifecycle —
+ * standard flow, personalization, each automation trigger the Google sync
+ * emits, and the assistant's own tools — asserting state after every step, then
+ * deletes everything it created.
+ *
+ * Does not call the Anthropic API: it exercises the tool layer directly, so it
+ * runs without an API key.
  *
  * Run with: npx tsx scripts/e2e-check.ts
  */
 import { PrismaClient } from "@prisma/client";
 import {
-  createApplication,
+  createOpportunity,
   addCustomStage,
   skipStage,
   moveToStage,
-} from "../src/server/applications";
+} from "../src/server/opportunities";
 import { dispatchEvent } from "../src/server/automation";
+import { runTool } from "../src/server/ai/tools";
 
 const prisma = new PrismaClient();
 
@@ -32,187 +36,225 @@ function check(label: string, condition: boolean, detail?: string) {
   }
 }
 
-async function stagesOf(applicationId: string) {
-  return prisma.applicationStage.findMany({
-    where: { applicationId },
+async function stagesOf(opportunityId: string) {
+  return prisma.opportunityStage.findMany({
+    where: { opportunityId },
     orderBy: { position: "asc" },
   });
 }
 
-async function currentKey(applicationId: string): Promise<string | null> {
-  const app = await prisma.application.findUnique({
-    where: { id: applicationId },
+async function currentKey(opportunityId: string): Promise<string | null> {
+  const o = await prisma.opportunity.findUnique({
+    where: { id: opportunityId },
     include: { currentStage: true },
   });
-  return app?.currentStage?.key ?? null;
+  return o?.currentStage?.key ?? null;
 }
 
 async function main() {
-  const org = await prisma.organization.findUnique({ where: { slug: "northwind-talent" } });
-  if (!org) throw new Error("Seed data missing — run `npx tsx prisma/seed.ts` first");
+  const user = await prisma.user.findUnique({ where: { email: "you@example.com" } });
+  if (!user) throw new Error("Seed data missing — run `npx tsx prisma/seed.ts` first");
 
-  const pipeline = await prisma.pipeline.findFirst({
-    where: { orgId: org.id, name: "Standard Engineering Hire" },
+  const template = await prisma.processTemplate.findFirst({
+    where: { userId: user.id, name: "Standard engineering loop" },
   });
-  if (!pipeline) throw new Error("Standard Engineering Hire pipeline missing");
+  if (!template) throw new Error("Standard template missing");
 
   const stamp = Date.now();
-  const job = await prisma.job.create({
+  const company = await prisma.company.create({
     data: {
-      orgId: org.id,
-      pipelineId: pipeline.id,
-      title: `E2E Check Role ${stamp}`,
-      status: "OPEN",
+      userId: user.id,
+      name: `E2E Check Co ${stamp}`,
+      domains: [`e2e-${stamp}.example`],
     },
   });
-  const candidate = await prisma.candidate.create({
-    data: {
-      orgId: org.id,
-      fullName: "E2E Check Candidate",
-      email: `e2e-check-${stamp}@example.com`,
-    },
-  });
+
+  let opportunityId = "";
 
   try {
     // --- 1. standard flow instantiation ------------------------------------
     console.log("\n1. Standard flow is copied from the template");
-    const app = await createApplication({
-      orgId: org.id,
-      jobId: job.id,
-      candidateId: candidate.id,
+    const opportunity = await createOpportunity({
+      userId: user.id,
+      companyId: company.id,
+      templateId: template.id,
+      roleTitle: "E2E Role",
       actor: { type: "USER" },
     });
-    const initial = await stagesOf(app.id);
-    check("stages copied from pipeline", initial.length === 9, `got ${initial.length}`);
-    check("first stage is active", await currentKey(app.id) === "applied");
-    check("flow starts STANDARD", app.flowMode === "STANDARD");
-    check(
-      "later stages are pending",
-      initial.filter((s) => s.status === "PENDING").length === 8,
-    );
+    opportunityId = opportunity.id;
+
+    const initial = await stagesOf(opportunityId);
+    check("stages copied from template", initial.length === 9, `got ${initial.length}`);
+    check("first stage is active", (await currentKey(opportunityId)) === "researching");
+    check("flow starts STANDARD", opportunity.flowMode === "STANDARD");
 
     // --- 2. personalization: custom stage placement ------------------------
-    console.log("\n2. Personalization — a custom stage lands before terminal stages");
+    console.log("\n2. Personalization — a custom step lands before terminal stages");
     await addCustomStage({
-      applicationId: app.id,
-      name: "Founder Chat",
-      type: "INTERVIEW",
+      opportunityId,
+      name: "Pairing session",
+      type: "TECHNICAL_INTERVIEW",
       actor: { type: "USER" },
     });
-    const withCustom = await stagesOf(app.id);
-    const founderIdx = withCustom.findIndex((s) => s.key === "founder_chat");
-    const hiredIdx = withCustom.findIndex((s) => s.key === "hired");
-    check("custom stage was added", founderIdx !== -1);
+    const withCustom = await stagesOf(opportunityId);
+    const pairingIdx = withCustom.findIndex((s) => s.key === "pairing_session");
+    const acceptedIdx = withCustom.findIndex((s) => s.key === "accepted");
+    check("custom stage added", pairingIdx !== -1);
     check(
-      "custom stage sits before Hired",
-      founderIdx !== -1 && hiredIdx !== -1 && founderIdx < hiredIdx,
-      `founder=${founderIdx} hired=${hiredIdx}`,
+      "custom stage sits before Accepted",
+      pairingIdx !== -1 && acceptedIdx !== -1 && pairingIdx < acceptedIdx,
+      `pairing=${pairingIdx} accepted=${acceptedIdx}`,
     );
     check(
       "positions stay contiguous",
       withCustom.every((s, i) => s.position === i),
       withCustom.map((s) => s.position).join(","),
     );
-    const afterPersonalize = await prisma.application.findUnique({ where: { id: app.id } });
-    check("flow flipped to PERSONALIZED", afterPersonalize?.flowMode === "PERSONALIZED");
+    const personalized = await prisma.opportunity.findUnique({ where: { id: opportunityId } });
+    check("flow flipped to PERSONALIZED", personalized?.flowMode === "PERSONALIZED");
 
     // --- 3. personalization: skipping ---------------------------------------
-    console.log("\n3. Personalization — skipping a stage keeps it visible but inert");
-    const assessment = withCustom.find((s) => s.key === "assessment")!;
+    console.log("\n3. Personalization — a skipped stage stays visible but inert");
+    const takeHome = withCustom.find((s) => s.key === "take_home")!;
     await skipStage({
-      applicationId: app.id,
-      stageId: assessment.id,
+      opportunityId,
+      stageId: takeHome.id,
       actor: { type: "USER" },
-      reason: "Waived",
+      reason: "They waived it",
     });
-    const skipped = (await stagesOf(app.id)).find((s) => s.key === "assessment");
+    const skipped = (await stagesOf(opportunityId)).find((s) => s.key === "take_home");
     check("stage marked SKIPPED", skipped?.status === "SKIPPED");
-    check("skip reason recorded", skipped?.notes === "Waived");
+    check("skip reason recorded", skipped?.notes === "They waived it");
 
-    // --- 4. automation: candidate replies -----------------------------------
+    // --- 4. automation: they replied ----------------------------------------
     console.log("\n4. Automation — an inbound reply completes a screening stage");
     await moveToStage({
-      applicationId: app.id,
-      target: { stageKey: "recruiter_call" },
+      opportunityId,
+      target: { stageKey: "recruiter_screen" },
       actor: { type: "USER" },
     });
-    check("moved to recruiter call", await currentKey(app.id) === "recruiter_call");
-
     const replyOutcomes = await dispatchEvent({
-      orgId: org.id,
-      applicationId: app.id,
-      trigger: "EMAIL_RECEIVED_FROM_CANDIDATE",
-      payload: {
-        title: "Re: chat about the role",
-        body: "Yes, Tuesday works for me!",
-        fromEmail: candidate.email,
-      },
+      userId: user.id,
+      opportunityId,
+      trigger: "EMAIL_RECEIVED_FROM_COMPANY",
+      payload: { title: "Re: next steps", body: "Great chatting — let's book the next round." },
     });
     check("a rule fired", replyOutcomes.some((o) => o.applied), JSON.stringify(replyOutcomes));
-    const afterReply = (await stagesOf(app.id)).find((s) => s.key === "recruiter_call");
-    check("recruiter call completed by automation", afterReply?.status === "COMPLETED");
+    const afterReply = (await stagesOf(opportunityId)).find((s) => s.key === "recruiter_screen");
+    check("recruiter screen completed by automation", afterReply?.status === "COMPLETED");
 
     // --- 5. automation: interview booked ------------------------------------
-    console.log("\n5. Automation — booking a technical interview moves the stage");
+    console.log("\n5. Automation — a technical interview invite moves the stage");
     const bookOutcomes = await dispatchEvent({
-      orgId: org.id,
-      applicationId: app.id,
+      userId: user.id,
+      opportunityId,
       trigger: "CALENDAR_EVENT_SCHEDULED",
-      payload: { title: "Technical Interview — E2E Check Candidate" },
+      payload: { title: "Technical interview — E2E Role" },
     });
     check("a rule fired", bookOutcomes.some((o) => o.applied), JSON.stringify(bookOutcomes));
     check(
       "moved to technical interview",
-      await currentKey(app.id) === "tech_interview",
-      `current=${await currentKey(app.id)}`,
+      (await currentKey(opportunityId)) === "tech_interview",
+      `current=${await currentKey(opportunityId)}`,
     );
-    const skippedStillSkipped = (await stagesOf(app.id)).find((s) => s.key === "assessment");
+    const stillSkipped = (await stagesOf(opportunityId)).find((s) => s.key === "take_home");
     check(
       "jumped-over skipped stage stays SKIPPED",
-      skippedStillSkipped?.status === "SKIPPED",
-      `got ${skippedStillSkipped?.status}`,
+      stillSkipped?.status === "SKIPPED",
+      `got ${stillSkipped?.status}`,
     );
 
-    // --- 6. automation: interview finished ----------------------------------
-    console.log("\n6. Automation — a finished interview advances the flow");
-    const doneOutcomes = await dispatchEvent({
-      orgId: org.id,
-      applicationId: app.id,
-      trigger: "CALENDAR_EVENT_COMPLETED",
-      payload: { title: "Technical Interview — E2E Check Candidate" },
+    // --- 6. automation: rejection email -------------------------------------
+    console.log("\n6. Automation — a rejection email closes the process");
+    const rejectOutcomes = await dispatchEvent({
+      userId: user.id,
+      opportunityId,
+      trigger: "EMAIL_RECEIVED_FROM_COMPANY",
+      payload: {
+        title: "Update on your application",
+        body: "Unfortunately we have decided not to proceed with your application.",
+      },
     });
-    check("a rule fired", doneOutcomes.some((o) => o.applied), JSON.stringify(doneOutcomes));
+    check("a rule fired", rejectOutcomes.some((o) => o.applied), JSON.stringify(rejectOutcomes));
+    const rejected = await prisma.opportunity.findUnique({ where: { id: opportunityId } });
+    check("opportunity marked REJECTED", rejected?.status === "REJECTED", `got ${rejected?.status}`);
+    check("close date recorded", rejected?.closedAt != null);
+
+    // --- 7. assistant tools --------------------------------------------------
+    console.log("\n7. Assistant tools operate on real state");
+    const ctx = { userId: user.id, opportunityId };
+
+    const listed = await runTool("list_opportunities", {}, ctx);
+    check("list_opportunities returns rows", Array.isArray(listed.result));
+
+    const got = await runTool("get_opportunity", { opportunityId }, ctx);
+    const detail = got.result as { company?: string; stages?: unknown[] };
+    check("get_opportunity returns the process", detail.company === company.name);
+    check("get_opportunity includes stages", (detail.stages?.length ?? 0) === 10);
+
+    const drafted = await runTool(
+      "draft_email",
+      {
+        opportunityId,
+        toEmail: "someone@e2e.example",
+        subject: "Thanks for the update",
+        body: "Thanks for letting me know — I'd welcome the chance to stay in touch.",
+        rationale: "Keeps the door open after a rejection.",
+      },
+      ctx,
+    );
+    const draftResult = drafted.result as { draftId?: string };
+    check("draft_email created a draft", Boolean(draftResult.draftId));
+
+    const draftRow = draftResult.draftId
+      ? await prisma.emailDraft.findUnique({ where: { id: draftResult.draftId } })
+      : null;
+    check("draft is unsent and awaiting approval", draftRow?.status === "DRAFT");
+    check("draft is attributed to the assistant", draftRow?.createdBy === "ASSISTANT");
+    check("draft was NOT sent", draftRow?.sentAt === null && draftRow?.gmailId === null);
+
+    const noted = await runTool(
+      "add_note",
+      { opportunityId, body: "Interviewer mentioned they use Go and Temporal." },
+      ctx,
+    );
+    check("add_note succeeded", (noted.result as { ok?: boolean }).ok === true);
+
+    const badTool = await runTool("get_opportunity", { opportunityId: 42 }, ctx);
+    check("invalid tool input is rejected, not thrown", badTool.isError);
+
+    const foreign = await runTool(
+      "get_opportunity",
+      { opportunityId: "does-not-exist" },
+      ctx,
+    );
     check(
-      "advanced past the interview",
-      await currentKey(app.id) === "hm_interview",
-      `current=${await currentKey(app.id)}`,
+      "tools refuse records outside your account",
+      (foreign.result as { error?: string }).error === "Opportunity not found",
     );
 
-    // --- 7. terminal stage settles the application --------------------------
-    console.log("\n7. Reaching a terminal stage settles the application");
-    await moveToStage({
-      applicationId: app.id,
-      target: { stageKey: "hired" },
-      actor: { type: "USER" },
-    });
-    const settled = await prisma.application.findUnique({ where: { id: app.id } });
-    check("application marked HIRED", settled?.status === "HIRED", `got ${settled?.status}`);
-
-    // --- 8. audit trail -----------------------------------------------------
+    // --- 8. audit trail ------------------------------------------------------
     console.log("\n8. Every change left an audit trail");
-    const transitions = await prisma.stageTransition.count({ where: { applicationId: app.id } });
-    const activities = await prisma.activity.count({ where: { applicationId: app.id } });
+    const transitions = await prisma.stageTransition.count({ where: { opportunityId } });
+    const activities = await prisma.activity.count({ where: { opportunityId } });
     const automated = await prisma.stageTransition.count({
-      where: { applicationId: app.id, actorType: "AUTOMATION" },
+      where: { opportunityId, actorType: "AUTOMATION" },
     });
-    check("transitions recorded", transitions >= 5, `got ${transitions}`);
+    const assisted = await prisma.activity.count({
+      where: { opportunityId, actorType: "ASSISTANT" },
+    });
+    // Three: created, → recruiter screen, → technical interview. The rejection
+    // sets status without moving a stage, which is the intended behaviour.
+    check("transitions recorded", transitions >= 3, `got ${transitions}`);
     check("activities recorded", activities >= 8, `got ${activities}`);
-    check("automation attributed to rules", automated >= 2, `got ${automated}`);
+    check("automation attributed to rules", automated >= 1, `got ${automated}`);
+    check("assistant actions attributed", assisted >= 2, `got ${assisted}`);
   } finally {
-    // Clean up — cascades remove stages, transitions, activities and notes.
-    await prisma.application.deleteMany({ where: { jobId: job.id } });
-    await prisma.job.delete({ where: { id: job.id } });
-    await prisma.candidate.delete({ where: { id: candidate.id } });
+    // Clean up — cascades remove stages, transitions, activities, drafts, notes.
+    if (opportunityId) {
+      await prisma.opportunity.deleteMany({ where: { id: opportunityId } });
+    }
+    await prisma.company.deleteMany({ where: { id: company.id } });
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

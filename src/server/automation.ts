@@ -4,14 +4,15 @@ import {
   advanceStage,
   completeCurrentStage,
   moveToStage,
-  setApplicationStatus,
-} from "@/server/applications";
+  setOpportunityStatus,
+  setNextAction,
+} from "@/server/opportunities";
 import type {
   AutomationRule,
   RuleTrigger,
   StageType,
-  Application,
-  ApplicationStage,
+  Opportunity,
+  OpportunityStage,
 } from "@prisma/client";
 import { z } from "zod";
 
@@ -20,8 +21,8 @@ import { z } from "zod";
  *
  * Sync adapters never touch stages directly. They emit a typed event here, and
  * rules decide what it means. That keeps "what Google told us" separate from
- * "what our process does about it", so a customer can retune the process
- * without a code change.
+ * "what that means for my process", so you can retune behaviour on the
+ * Automations page without a code change.
  */
 
 export const conditionsSchema = z
@@ -30,16 +31,14 @@ export const conditionsSchema = z
     titleContains: z.array(z.string()).optional(),
     /** Any of these substrings must appear in the body / description. */
     bodyContains: z.array(z.string()).optional(),
-    /** Restrict to applications currently sitting on one of these stage types. */
+    /** Restrict to opportunities sitting on one of these stage types. */
     currentStageType: z.array(z.string()).optional(),
-    /** Restrict to applications currently sitting on one of these stage keys. */
+    /** Restrict to opportunities sitting on one of these stage keys. */
     currentStageKey: z.array(z.string()).optional(),
-    /** Restrict by the sender's domain, e.g. ["gmail.com"]. */
-    fromDomain: z.array(z.string()).optional(),
     /** Restrict by file mime type substring, e.g. ["pdf"]. */
     mimeTypeContains: z.array(z.string()).optional(),
-    /** Only fire when the application is in this status (default: ACTIVE only). */
-    applicationStatus: z.array(z.string()).optional(),
+    /** Only fire when the opportunity is in one of these statuses. */
+    opportunityStatus: z.array(z.string()).optional(),
   })
   .strict()
   .default({});
@@ -49,10 +48,10 @@ export const configSchema = z
     stageKey: z.string().optional(),
     stageType: z.string().optional(),
     status: z
-      .enum(["ACTIVE", "ON_HOLD", "HIRED", "REJECTED", "WITHDRAWN"])
+      .enum(["ACTIVE", "ON_HOLD", "OFFER", "ACCEPTED", "REJECTED", "WITHDRAWN", "GHOSTED"])
       .optional(),
     message: z.string().optional(),
-    fileKind: z.string().optional(),
+    nextAction: z.string().optional(),
   })
   .strict()
   .default({});
@@ -70,16 +69,13 @@ export type RuleEventPayload = {
 };
 
 export type RuleEvent = {
-  orgId: string;
-  applicationId: string;
+  userId: string;
+  opportunityId: string;
   trigger: RuleTrigger;
   payload: RuleEventPayload;
 };
 
-type LoadedApplication = Application & {
-  currentStage: ApplicationStage | null;
-  job: { id: string; pipelineId: string; title: string };
-};
+type LoadedOpportunity = Opportunity & { currentStage: OpportunityStage | null };
 
 function anyMatch(haystack: string | null | undefined, needles?: string[]): boolean {
   if (!needles || needles.length === 0) return true;
@@ -90,35 +86,34 @@ function anyMatch(haystack: string | null | undefined, needles?: string[]): bool
 
 function matchesConditions(
   rule: AutomationRule,
-  app: LoadedApplication,
+  opportunity: LoadedOpportunity,
   payload: RuleEventPayload,
 ): boolean {
   const parsed = conditionsSchema.safeParse(rule.conditions ?? {});
   if (!parsed.success) return false;
   const c = parsed.data;
 
-  const allowedStatuses = c.applicationStatus ?? ["ACTIVE"];
-  if (!allowedStatuses.includes(app.status)) return false;
+  const allowedStatuses = c.opportunityStatus ?? ["ACTIVE", "ON_HOLD", "OFFER"];
+  if (!allowedStatuses.includes(opportunity.status)) return false;
 
   if (!anyMatch(payload.title, c.titleContains)) return false;
   if (!anyMatch(payload.body, c.bodyContains)) return false;
   if (!anyMatch(payload.mimeType, c.mimeTypeContains)) return false;
 
-  if (c.fromDomain && c.fromDomain.length > 0) {
-    const domain = payload.fromEmail?.split("@")[1]?.toLowerCase();
-    if (!domain || !c.fromDomain.some((d) => domain.endsWith(d.toLowerCase()))) {
-      return false;
-    }
-  }
-
   if (c.currentStageType && c.currentStageType.length > 0) {
-    if (!app.currentStage || !c.currentStageType.includes(app.currentStage.type)) {
+    if (
+      !opportunity.currentStage ||
+      !c.currentStageType.includes(opportunity.currentStage.type)
+    ) {
       return false;
     }
   }
 
   if (c.currentStageKey && c.currentStageKey.length > 0) {
-    if (!app.currentStage || !c.currentStageKey.includes(app.currentStage.key)) {
+    if (
+      !opportunity.currentStage ||
+      !c.currentStageKey.includes(opportunity.currentStage.key)
+    ) {
       return false;
     }
   }
@@ -135,7 +130,7 @@ export type RuleOutcome = {
 
 async function runAction(
   rule: AutomationRule,
-  app: LoadedApplication,
+  opportunity: LoadedOpportunity,
   payload: RuleEventPayload,
 ): Promise<RuleOutcome> {
   const cfgParsed = configSchema.safeParse(rule.config ?? {});
@@ -146,16 +141,14 @@ async function runAction(
   switch (rule.action) {
     case "ADVANCE_STAGE": {
       const res = await advanceStage({
-        applicationId: app.id,
+        opportunityId: opportunity.id,
         actor,
         reason: `Automation: ${rule.name}`,
       });
       return {
         ...base,
         applied: res.moved,
-        detail: res.moved
-          ? `Advanced to ${res.stage?.name}`
-          : res.reason ?? "No move",
+        detail: res.moved ? `Advanced to ${res.stage?.name}` : res.reason ?? "No move",
       };
     }
 
@@ -164,7 +157,7 @@ async function runAction(
         return { ...base, applied: false, detail: "Rule has no target stage configured" };
       }
       const res = await moveToStage({
-        applicationId: app.id,
+        opportunityId: opportunity.id,
         target: {
           stageKey: cfg.stageKey,
           stageType: cfg.stageType as StageType | undefined,
@@ -175,31 +168,29 @@ async function runAction(
       return {
         ...base,
         applied: res.moved,
-        detail: res.moved
-          ? `Moved to ${res.stage?.name}`
-          : res.reason ?? "No move",
+        detail: res.moved ? `Moved to ${res.stage?.name}` : res.reason ?? "No move",
       };
     }
 
     case "COMPLETE_CURRENT_STAGE": {
       const done = await completeCurrentStage({
-        applicationId: app.id,
+        opportunityId: opportunity.id,
         actor,
         reason: `Automation: ${rule.name}`,
       });
       return {
         ...base,
         applied: done,
-        detail: done ? "Marked current stage complete" : "No active stage",
+        detail: done ? "Marked the current stage complete" : "No active stage",
       };
     }
 
-    case "SET_APPLICATION_STATUS": {
+    case "SET_OPPORTUNITY_STATUS": {
       if (!cfg.status) {
         return { ...base, applied: false, detail: "Rule has no status configured" };
       }
-      await setApplicationStatus({
-        applicationId: app.id,
+      await setOpportunityStatus({
+        opportunityId: opportunity.id,
         status: cfg.status,
         actor,
         reason: `Automation: ${rule.name}`,
@@ -207,11 +198,22 @@ async function runAction(
       return { ...base, applied: true, detail: `Status set to ${cfg.status}` };
     }
 
+    case "SET_NEXT_ACTION": {
+      if (!cfg.nextAction) {
+        return { ...base, applied: false, detail: "Rule has no next action configured" };
+      }
+      await setNextAction({
+        opportunityId: opportunity.id,
+        action: cfg.nextAction,
+        actor,
+      });
+      return { ...base, applied: true, detail: `Next action: ${cfg.nextAction}` };
+    }
+
     case "FLAG_FOR_REVIEW": {
       await logActivity({
-        orgId: app.orgId,
-        applicationId: app.id,
-        candidateId: app.candidateId,
+        userId: opportunity.userId,
+        opportunityId: opportunity.id,
         type: "FLAGGED",
         title: cfg.message ?? `Flagged by "${rule.name}"`,
         body: payload.title ?? null,
@@ -222,12 +224,10 @@ async function runAction(
     }
 
     case "LOG_ACTIVITY":
-    case "ATTACH_TO_APPLICATION":
     default: {
       await logActivity({
-        orgId: app.orgId,
-        applicationId: app.id,
-        candidateId: app.candidateId,
+        userId: opportunity.userId,
+        opportunityId: opportunity.id,
         type: "SYNC",
         title: cfg.message ?? rule.name,
         body: payload.title ?? null,
@@ -241,36 +241,27 @@ async function runAction(
 
 /**
  * Evaluates every enabled rule for a trigger, in priority order, and runs the
- * first one that matches. Stopping at the first match keeps outcomes
- * predictable — two rules cannot fight over the same event.
+ * first that matches. Stopping at the first match keeps outcomes predictable —
+ * two rules cannot fight over the same event.
  */
 export async function dispatchEvent(event: RuleEvent): Promise<RuleOutcome[]> {
-  const app = await prisma.application.findUnique({
-    where: { id: event.applicationId },
-    include: {
-      currentStage: true,
-      job: { select: { id: true, pipelineId: true, title: true } },
-    },
+  const opportunity = await prisma.opportunity.findUnique({
+    where: { id: event.opportunityId },
+    include: { currentStage: true },
   });
-  if (!app) return [];
+  if (!opportunity) return [];
 
   const rules = await prisma.automationRule.findMany({
-    where: {
-      orgId: event.orgId,
-      trigger: event.trigger,
-      enabled: true,
-      OR: [{ jobId: null }, { jobId: app.jobId }],
-      AND: [{ OR: [{ pipelineId: null }, { pipelineId: app.job.pipelineId }] }],
-    },
+    where: { userId: event.userId, trigger: event.trigger, enabled: true },
     orderBy: [{ priority: "asc" }, { createdAt: "asc" }],
   });
 
   const outcomes: RuleOutcome[] = [];
 
   for (const rule of rules) {
-    if (!matchesConditions(rule, app as LoadedApplication, event.payload)) continue;
+    if (!matchesConditions(rule, opportunity as LoadedOpportunity, event.payload)) continue;
 
-    const outcome = await runAction(rule, app as LoadedApplication, event.payload);
+    const outcome = await runAction(rule, opportunity as LoadedOpportunity, event.payload);
     outcomes.push(outcome);
 
     await prisma.automationRule.update({
@@ -286,50 +277,48 @@ export async function dispatchEvent(event: RuleEvent): Promise<RuleOutcome[]> {
 }
 
 /**
- * Flags applications that have sat in a stage past its SLA. Run on a schedule
- * by the worker.
+ * Flags processes that have gone quiet past the stage's chase-after window —
+ * the "should I nudge them?" signal. Run on a schedule by the worker.
  */
-export async function checkStageSlas(orgId: string): Promise<number> {
+export async function checkQuietStages(userId: string): Promise<number> {
   const now = new Date();
-  const overdue = await prisma.application.findMany({
+  const quiet = await prisma.opportunity.findMany({
     where: {
-      orgId,
-      status: "ACTIVE",
-      currentStage: { dueAt: { lt: now }, status: "ACTIVE" },
+      userId,
+      status: { in: ["ACTIVE", "OFFER"] },
+      currentStage: { chaseAt: { lt: now }, status: "ACTIVE" },
     },
-    include: { currentStage: true },
+    include: { currentStage: true, company: true },
   });
 
   let fired = 0;
-  for (const app of overdue) {
-    if (!app.currentStage) continue;
+  for (const opportunity of quiet) {
+    if (!opportunity.currentStage) continue;
 
-    // Only flag once per stage entry — look for an existing flag raised after
-    // the application entered this stage.
+    // Only flag once per stage entry.
     const already = await prisma.activity.findFirst({
       where: {
-        applicationId: app.id,
+        opportunityId: opportunity.id,
         type: "FLAGGED",
-        occurredAt: { gte: app.currentStage.enteredAt ?? app.createdAt },
+        occurredAt: { gte: opportunity.currentStage.enteredAt ?? opportunity.createdAt },
       },
     });
     if (already) continue;
 
     await logActivity({
-      orgId,
-      applicationId: app.id,
-      candidateId: app.candidateId,
+      userId,
+      opportunityId: opportunity.id,
       type: "FLAGGED",
-      title: `Stalled in ${app.currentStage.name}`,
-      body: `Past its ${app.currentStage.slaDays}-day target.`,
+      title: `${opportunity.company.name} has gone quiet`,
+      body: `No movement on ${opportunity.currentStage.name} for ${opportunity.currentStage.chaseAfterDays} days — worth a nudge.`,
       actorType: "AUTOMATION",
     });
 
     await dispatchEvent({
-      orgId,
-      applicationId: app.id,
-      trigger: "STAGE_SLA_BREACHED",
-      payload: { title: app.currentStage.name, occurredAt: now },
+      userId,
+      opportunityId: opportunity.id,
+      trigger: "STAGE_WENT_QUIET",
+      payload: { title: opportunity.currentStage.name, occurredAt: now },
     });
 
     fired++;

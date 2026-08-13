@@ -21,15 +21,14 @@ async function devLogin(formData: FormData) {
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) throw new Error(`No user with email ${email}`);
 
-  await createSession({ userId: user.id, orgId: user.orgId });
+  await createSession({ userId: user.id });
   redirect("/");
 }
 
 export default async function LoginPage() {
   if (await getCurrentUser()) redirect("/");
 
-  const devEnabled =
-    process.env.DEV_LOGIN === "true" || process.env.DEV_LOGIN === "1";
+  const devEnabled = process.env.DEV_LOGIN === "true" || process.env.DEV_LOGIN === "1";
   const users = devEnabled
     ? await prisma.user.findMany({ orderBy: { createdAt: "asc" }, take: 5 })
     : [];
@@ -38,20 +37,13 @@ export default async function LoginPage() {
     <div className="grid min-h-screen lg:grid-cols-2">
       <div className="flex items-center justify-center px-6 py-16">
         <div className="w-full max-w-sm animate-in-soft">
-          <div className="mb-8 flex items-center gap-2.5">
-            <div className="grid h-9 w-9 place-items-center rounded-lg bg-indigo-600 text-sm font-semibold text-white">
-              N
-            </div>
-            <span className="text-base font-semibold text-slate-900">
-              Northwind Recruitment
-            </span>
+          <div className="mb-8">
+            <span className="text-base font-semibold text-slate-900">Job search</span>
           </div>
 
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-            Sign in
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">Sign in</h1>
           <p className="mt-1.5 text-sm text-slate-500">
-            Connect Google Workspace to track every candidate automatically.
+            Connect Google so your processes track themselves.
           </p>
 
           <a
@@ -68,8 +60,7 @@ export default async function LoginPage() {
 
           {!googleConfigured() && (
             <p className="mt-2 text-xs text-slate-400">
-              Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to enable Google
-              sign-in.
+              Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to enable Google sign-in.
             </p>
           )}
 
@@ -77,9 +68,7 @@ export default async function LoginPage() {
             <div className="mt-8">
               <div className="flex items-center gap-3">
                 <div className="h-px flex-1 bg-slate-200" />
-                <span className="text-xs font-medium text-slate-400">
-                  DEV LOGIN
-                </span>
+                <span className="text-xs font-medium text-slate-400">DEV LOGIN</span>
                 <div className="h-px flex-1 bg-slate-200" />
               </div>
 
@@ -91,12 +80,8 @@ export default async function LoginPage() {
                       type="submit"
                       className="w-full rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-left text-sm transition-colors hover:border-indigo-300 hover:bg-indigo-50/40"
                     >
-                      <span className="font-medium text-slate-900">
-                        {user.name}
-                      </span>
-                      <span className="ml-2 text-xs text-slate-500">
-                        {user.role.toLowerCase().replace("_", " ")}
-                      </span>
+                      <span className="font-medium text-slate-900">{user.name}</span>
+                      <span className="ml-2 text-xs text-slate-500">{user.email}</span>
                     </button>
                   </form>
                 ))}
@@ -109,21 +94,25 @@ export default async function LoginPage() {
       <div className="hidden flex-col justify-center border-l border-slate-200 bg-white px-12 lg:flex">
         <div className="max-w-md">
           <h2 className="text-lg font-semibold tracking-tight text-slate-900">
-            The process keeps itself up to date
+            One place for every process you&apos;re in
           </h2>
           <ul className="mt-6 space-y-4">
             {[
               {
-                title: "Standard flows, personalised per candidate",
-                body: "Start from a pipeline template, then add, skip or reorder steps for one person without touching anyone else's process.",
+                title: "Their process, not a generic one",
+                body: "Start from your expectation of how hiring goes, then bend it to what each company actually does — an extra founder chat, a waived take-home.",
               },
               {
-                title: "Gmail, Calendar and Drive stay in sync",
-                body: "Replies, interviews and documents are matched to the right candidate and appear on their timeline automatically.",
+                title: "It updates itself",
+                body: "Recruiter mail, calendar invites and documents are matched to the right company and move the stage without you touching it.",
               },
               {
-                title: "Status moves itself",
-                body: "Booking an interview or finishing one advances the stage. Rules decide what each signal means, so you can retune without code.",
+                title: "An assistant that has read the thread",
+                body: "Ask for a follow-up and it drafts one from what actually happened. It never sends — you review and press send.",
+              },
+              {
+                title: "Take-homes, handled properly",
+                body: "Paste the brief and get it broken into checkable requirements and a plan sized to the deadline.",
               },
             ].map((item) => (
               <li key={item.title} className="flex gap-3">
@@ -132,12 +121,8 @@ export default async function LoginPage() {
                   strokeWidth={2}
                 />
                 <div>
-                  <div className="text-sm font-medium text-slate-900">
-                    {item.title}
-                  </div>
-                  <p className="mt-0.5 text-sm leading-relaxed text-slate-500">
-                    {item.body}
-                  </p>
+                  <div className="text-sm font-medium text-slate-900">{item.title}</div>
+                  <p className="mt-0.5 text-sm leading-relaxed text-slate-500">{item.body}</p>
                 </div>
               </li>
             ))}

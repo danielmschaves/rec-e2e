@@ -2,36 +2,41 @@ import Link from "next/link";
 import {
   Mail,
   MailOpen,
+  PenLine,
   CalendarPlus,
   CalendarCheck,
   CalendarX,
   FileText,
   MessageSquare,
-  ClipboardCheck,
+  Code2,
   Flag,
   GitCommitHorizontal,
-  UserPlus,
+  Rocket,
   RefreshCw,
   CircleCheck,
   ToggleRight,
+  Sparkles,
 } from "lucide-react";
 import type { Activity, ActivityType, ActorType } from "@prisma/client";
 import { relativeTime } from "@/lib/ui";
 
 const ICONS: Record<ActivityType, typeof Mail> = {
-  APPLICATION_CREATED: UserPlus,
+  OPPORTUNITY_CREATED: Rocket,
   STAGE_CHANGED: GitCommitHorizontal,
   STAGE_COMPLETED: CircleCheck,
   EMAIL_RECEIVED: MailOpen,
   EMAIL_SENT: Mail,
+  DRAFT_CREATED: PenLine,
   INTERVIEW_SCHEDULED: CalendarPlus,
   INTERVIEW_COMPLETED: CalendarCheck,
   INTERVIEW_CANCELLED: CalendarX,
   FILE_ATTACHED: FileText,
   NOTE_ADDED: MessageSquare,
-  SCORECARD_ADDED: ClipboardCheck,
+  CHALLENGE_CREATED: Code2,
+  CHALLENGE_UPDATED: Code2,
   STATUS_CHANGED: ToggleRight,
   FLAGGED: Flag,
+  ASSISTANT: Sparkles,
   SYNC: RefreshCw,
 };
 
@@ -40,22 +45,20 @@ const TONES: Partial<Record<ActivityType, string>> = {
   INTERVIEW_CANCELLED: "bg-rose-50 text-rose-600",
   STAGE_COMPLETED: "bg-emerald-50 text-emerald-600",
   INTERVIEW_COMPLETED: "bg-emerald-50 text-emerald-600",
-  APPLICATION_CREATED: "bg-indigo-50 text-indigo-600",
+  OPPORTUNITY_CREATED: "bg-indigo-50 text-indigo-600",
+  DRAFT_CREATED: "bg-violet-50 text-violet-600",
 };
 
 const ACTOR_LABEL: Record<ActorType, string | null> = {
   USER: null,
+  ASSISTANT: "Assistant",
   AUTOMATION: "Automation",
   SYNC: "Synced",
   SYSTEM: null,
 };
 
 type FeedItem = Activity & {
-  application?: {
-    id: string;
-    candidate: { fullName: string };
-    job: { title: string };
-  } | null;
+  opportunity?: { id: string; roleTitle: string; company: { name: string } } | null;
 };
 
 export function ActivityFeed({
@@ -73,7 +76,6 @@ export function ActivityFeed({
 
   return (
     <ol className="relative space-y-4">
-      {/* Spine behind the icons; stops short of the last item's icon. */}
       <span
         className="absolute top-3 bottom-3 left-[15px] w-px bg-slate-200"
         aria-hidden="true"
@@ -100,18 +102,12 @@ export function ActivityFeed({
                 )}
               </div>
               {activity.body && (
-                <p className="mt-0.5 line-clamp-2 text-sm text-slate-500">
-                  {activity.body}
-                </p>
+                <p className="mt-0.5 line-clamp-2 text-sm text-slate-500">{activity.body}</p>
               )}
               <div className="mt-0.5 text-xs text-slate-400">
                 {relativeTime(activity.occurredAt)}
-                {showLinks && activity.application && (
-                  <>
-                    {" · "}
-                    {activity.application.candidate.fullName} ·{" "}
-                    {activity.application.job.title}
-                  </>
+                {showLinks && activity.opportunity && (
+                  <> · {activity.opportunity.company.name}</>
                 )}
               </div>
             </div>
@@ -120,9 +116,9 @@ export function ActivityFeed({
 
         return (
           <li key={activity.id}>
-            {showLinks && activity.applicationId ? (
+            {showLinks && activity.opportunityId ? (
               <Link
-                href={`/applications/${activity.applicationId}`}
+                href={`/processes/${activity.opportunityId}`}
                 className="-mx-2 block rounded-lg px-2 py-1 transition-colors hover:bg-slate-50"
               >
                 {content}

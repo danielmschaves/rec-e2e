@@ -1,154 +1,199 @@
 # Architecture
 
-## The central decision: applications own their stages
+## Persona: you are the constant
 
-A naive ATS points an application at a stage row in a shared pipeline. That
-makes personalisation impossible without either forking the pipeline per
-candidate (unusable) or mutating a template other candidates depend on
-(dangerous).
+Everything hangs off a single `User`. A company-side ATS models one company and
+many candidates; this is the mirror image — one candidate (you) and many
+companies, each running their own process on you. That inversion decides the
+whole schema: `Opportunity` is *your* record of one company × role, and
+`Company` / `Contact` exist mainly so inbound mail can be matched back to it.
 
-Here, `Pipeline` / `PipelineStage` are templates, and creating an application
-copies the stages into `ApplicationStage` rows:
+## The central decision: opportunities own their stages
+
+A naive tracker points an opportunity at a stage row in a shared list. That
+makes it impossible to record what actually happens in a job search, which is
+that no two companies run the same process.
+
+Here, `ProcessTemplate` / `TemplateStage` are *your* expectation, and starting to
+track an opportunity copies the stages onto it:
 
 ```
-Pipeline "Standard Engineering Hire"
-  └── PipelineStage[]  applied, resume_screen, …, hired      (the template)
+ProcessTemplate "Standard engineering loop"
+  └── TemplateStage[]  applied, screen, take_home, …, accepted   (your flow)
 
-Application (Marina → Senior Backend Engineer)
-  └── ApplicationStage[]  applied, resume_screen, …, hired   (her own copy)
+Opportunity (Vela Health → Staff Engineer)
+  └── OpportunityStage[]  applied, screen, -take_home-, …        (their process)
 ```
 
-From then on, the application is self-contained. Adding a "Founder chat", or
-skipping the take-home, touches only her rows. `Application.flowMode` flips from
-`STANDARD` to `PERSONALIZED` on the first divergence, which is what the UI
-badges and what lets you find flows that no longer match their template.
+From then on the opportunity is self-contained. Vela waiving the take-home, or
+Orbital inserting a pairing session, touches only their rows.
+`Opportunity.flowMode` flips `STANDARD` → `PERSONALIZED` on first divergence,
+which is what the UI badges as "diverged from your flow".
 
 Two consequences worth stating:
 
-- **Templates can change freely.** Editing a pipeline never rewrites the process
-  of someone already midway through it.
-- **Skipping is not deleting.** A skipped stage stays on the record with status
-  `SKIPPED`, greyed out in the tracker. The history stays honest about what was
-  waived and why.
+- **Your template can change freely.** Editing a flow never rewrites the process
+  of a company you're already mid-way through.
+- **Skipping is not deleting.** A skipped stage stays with status `SKIPPED`,
+  struck through in the tracker. The record stays honest about what they waived.
 
 ## Stage movement
 
-All movement goes through `src/server/applications.ts`. `moveToStage` is the
-primitive; `advanceStage` and the automations are built on it.
+All movement goes through `src/server/opportunities.ts`. `moveToStage` is the
+primitive; `advanceStage` and every automation are built on it.
 
 Moving *forward* marks every `PENDING`/`ACTIVE` stage before the target as
-`COMPLETED`. Moving *backward* reopens everything after it. `SKIPPED` stages are
+`COMPLETED`; moving *backward* reopens everything after it. `SKIPPED` stages are
 left alone in both directions — being jumped over is exactly what a skipped
-stage is for. Reaching a stage typed `HIRED` or `REJECTED` settles the
-application status automatically.
+stage is for. Reaching a stage typed `OFFER`, `ACCEPTED` or `REJECTED` settles
+the opportunity's status automatically.
 
 Every move writes a `StageTransition` with an `actorType` of `USER`,
-`AUTOMATION`, `SYNC` or `SYSTEM`, plus the rule id when an automation caused it.
-"Why is this candidate at this stage?" is always answerable.
+`ASSISTANT`, `AUTOMATION`, `SYNC` or `SYSTEM`. "Why does the tracker think I'm
+at this stage?" is always answerable.
 
 ## Google sync
 
-Three adapters, one shape. Each one:
+Three adapters, one shape. Each:
 
 1. Pulls changes incrementally where the API allows — Gmail `history.list`,
    Calendar `syncToken`, Drive `changes.list` — falling back to a bounded window
-   on the first run or when a cursor expires (Gmail 404, Calendar 410).
-2. Matches the artifact to a candidate.
-3. Mirrors it into a local table (`EmailMessage`, `CalendarEvent`, `DriveFile`).
+   on first run or when a cursor expires (Gmail 404, Calendar 410).
+2. Matches the artifact to a company you're in a process with.
+3. Mirrors it locally (`EmailMessage`, `CalendarEvent`, `DriveFile`).
 4. Emits a typed event to the rule engine.
 
-Adapters never change a stage themselves. That separation is deliberate: what
-Google observed is a fact, what it means for your process is a policy, and
-policy belongs in rules a customer can edit.
+Adapters never change a stage themselves. What Google observed is a fact; what
+it means for your process is policy, and policy belongs in rules you can edit on
+the Automations page.
 
 ### Matching
 
-Email address is the join key — it is the one identifier present in a Gmail
-header, a Calendar attendee list and a Drive share alike. `matchByEmails`
-resolves the counterparty (for outbound mail, the recipients; for inbound, the
-sender) against `Candidate.email`.
+Two signals, in confidence order:
 
-When a candidate is in flight for two roles, `matchWithJobHint` disambiguates by
-looking for a job title in the subject or event description; otherwise it falls
-back to the most recently active application. Drive has no addresses in its
-metadata, so it matches on the file's parent folder first, then on the
-candidate's name or email local-part appearing in the filename.
+1. **A known contact's address.** `sara.lindqvist@nimbusdata.com` is on file, so
+   the mail is Nimbus.
+2. **The company's email domain.** A hiring manager who has never emailed you
+   before still lands on the right process. Consumer domains (gmail.com,
+   outlook.com, …) are excluded from this path — a gmail.com sender tells you
+   nothing about which company they are.
 
-Unmatched artifacts are **skipped, not stored**. Syncing a recruiter's mailbox
-should not mean copying their entire inbox into the ATS.
+When one company is running you through two roles, `pickOpportunity`
+disambiguates by looking for a role title in the subject or body, else takes the
+most recently active open one. Drive has no addresses in its metadata, so it
+matches on the file's parent folder or the company name in the filename.
+
+Unmatched mail is **skipped, not stored**. Syncing your inbox must not mean
+copying your inbox.
 
 ### Idempotency
 
-Re-running a sync must not double-post. Every mirror table has a unique index on
-`(orgId, externalId)` and adapters check before inserting. Calendar
-"event finished" has no webhook, so it is a sweep guarded by a
-`completedHandledAt` stamp; SLA breaches are guarded by looking for a flag raised
-since the stage was entered.
+Every mirror table has a unique index on `(userId, externalId)` and adapters
+check before inserting. Calendar "event finished" has no webhook, so it is a
+sweep guarded by `completedHandledAt`; the gone-quiet check is guarded by
+looking for a flag raised since the stage was entered.
 
 ## The rule engine
 
-`src/server/automation.ts`. A rule is `trigger → conditions → action`, scoped
-optionally to a pipeline or job.
+`src/server/automation.ts`. A rule is `trigger → conditions → action`:
 
 ```
-EMAIL_RECEIVED_FROM_CANDIDATE
-  conditions: { currentStageType: ["APPLIED", "SCREENING"] }
-  action:     COMPLETE_CURRENT_STAGE
+EMAIL_RECEIVED_FROM_COMPANY
+  conditions: { bodyContains: ["unfortunately", "not moving forward"] }
+  action:     SET_OPPORTUNITY_STATUS { status: "REJECTED" }
 ```
 
 Rules for a trigger are evaluated in `priority` order and **the first match
-wins**. Two rules can't fight over one event, which keeps behaviour predictable
-when a customer adds their own. Conditions and action config are JSON validated
-with Zod at evaluation time, so a malformed rule fails closed instead of
-throwing mid-sync.
+wins**, so two rules can't fight over one event. Conditions and action config
+are JSON validated with Zod at evaluation time, so a malformed rule fails closed
+rather than throwing mid-sync.
 
-The seeded rules encode a sensible default process: a reply during screening
-closes that stage, an event titled "technical interview" moves to that stage, a
-finished interview advances, a cancellation flags for a human rather than
-guessing.
+The seeded rules encode a sensible default: a reply while you're waiting closes
+that stage, a rejection email closes the process, an offer email raises it to
+the top, an invite naming a technical round moves you there, a finished
+interview advances, and anything past its chase window gets a next action.
+
+## The assistant
+
+`src/server/ai/`. Three files: `client.ts` (model id and configuration),
+`tools.ts` (the tool surface), `agent.ts` (the loop and system prompt).
+
+**Model:** `claude-opus-5` with adaptive thinking, effort configurable via
+`ASSISTANT_EFFORT` (default `high`).
+
+**A hand-written loop, not the SDK's tool runner.** Every turn is persisted to
+Postgres as it happens — assistant content blocks stored verbatim in
+`AssistantMessage.blocks`, tool results as their own row — so a refresh
+mid-answer loses nothing and the next turn replays the exact block sequence,
+keeping `tool_use`/`tool_result` pairs intact. Owning the loop puts that
+persistence in one obvious place. Tool results from a parallel turn are returned
+in a **single** user message, as the API requires.
+
+**Context is pre-loaded, not discovered.** A thread scoped to an opportunity
+renders that opportunity — stages, contacts, next action — directly into the
+system prompt, so the first question doesn't burn a tool call establishing which
+company you mean. A challenge thread renders the brief and requirement list the
+same way.
+
+**The tool surface is small and prescriptive.** Seven tools, each described in
+terms of *when* to call it rather than only what it does, which is what actually
+drives correct selection. Inputs are validated with Zod and ownership-checked
+against your `userId` before any write; a bad input comes back as a tool result,
+never an exception.
+
+### Why the assistant cannot send email
+
+`draft_email` writes an `EmailDraft` row. There is no tool that calls Gmail's
+send API. `sendDraft` lives in `src/server/sync/gmail.ts` and is reachable from
+exactly one place — the `sendDraftAction` server action behind the Drafts page
+button. This is a structural guarantee rather than an instruction the model
+could be talked out of, and `assistant-check.ts` asserts it on every run.
 
 ## Background work
 
-Docker runs a BullMQ worker (`worker/index.ts`) with a repeatable job that syncs
-every `SYNC_INTERVAL_MINUTES`, plus on-demand jobs from the "Sync now" button.
-Sync runs out-of-process so a slow Gmail backfill never blocks a request.
+Docker runs a BullMQ worker with a repeatable job syncing every
+`SYNC_INTERVAL_MINUTES`, plus on-demand jobs from "Sync now". Serverless has no
+such process, so `/api/cron/sync` does the same work inline, driven by
+`vercel.json` and protected by `CRON_SECRET`. Both call `syncAllAccounts()`.
 
-Serverless has no such process, so `/api/cron/sync` does the same work inline,
-driven by the cron in `vercel.json` and protected by `CRON_SECRET`. Both paths
-call the same `syncAllAccounts()`.
-
-Failures are isolated per provider: a Gmail outage must not stop Calendar from
-syncing. Each provider's run is recorded in `SyncRun` with counts and any error,
-which is what the Integrations page shows.
+Failures are isolated per provider — a Gmail outage must not stop Calendar. Each
+run is recorded in `SyncRun` with counts and any error, which is what the Setup
+page shows.
 
 ## Auth
 
 A signed JWT (jose, HS256) in an httpOnly cookie. Google OAuth uses an offline
-access code flow with a `state` cookie for CSRF; refresh tokens are persisted and
-the access token is refreshed transparently when within 60s of expiry — and a
-refresh response that omits a refresh token never overwrites the stored one,
-which is a common way to lose offline access.
+code flow with a `state` cookie for CSRF; refresh tokens are persisted and the
+access token refreshed transparently within 60s of expiry — and a refresh
+response omitting a refresh token never overwrites the stored one, a common way
+to silently lose offline access.
 
 `DEV_LOGIN=true` allows signing in as a seeded user without Google. It is off in
 the production compose file and must stay unset in any real deployment.
 
-## Deliberately out of scope for the MVP
+## Deliberately out of scope
 
-Called out so they read as decisions rather than oversights:
+Called out so they read as decisions, not oversights:
 
-- **Multi-tenancy is single-workspace.** Every query filters by `orgId` and
-  server actions verify ownership before mutating, so the model is ready — but
-  OAuth sign-in drops everyone into the first org rather than resolving a tenant.
-- **No RBAC enforcement.** Roles exist on `User` and are displayed; no
-  permission checks are wired to them yet.
+- **Not verified against the live Anthropic API.** No key was available in the
+  build environment. `assistant-check.ts` verifies the loop, tool dispatch,
+  persistence and the never-sends guarantee against a stubbed client; what it
+  cannot verify is that the model picks good tools or writes a good email.
+- **Not verified against live Google APIs** either, for the same reason — the
+  read/write adapters are unexercised network code. The engine that consumes
+  their events is fully tested.
+- **No streaming.** The assistant replies in one shot with a pending state.
+  Streaming would want an API route and client-side accumulation; the tracker
+  reads fine without it.
+- **Single user per deployment.** Every query filters by `userId` and server
+  actions verify ownership, so the model is ready for more — but sign-in creates
+  or finds one account with no tenant resolution.
 - **Push, not poll, is the endgame.** Gmail `watch` + Pub/Sub and Calendar push
-  channels would replace interval polling and cut latency to seconds. The cursor
-  fields (`gmailHistoryId`, `calendarSyncToken`, `driveStartPageToken`) are
-  already the ones a webhook handler needs.
+  channels would cut latency to seconds. The cursor fields (`gmailHistoryId`,
+  `calendarSyncToken`, `driveStartPageToken`) are already what a webhook handler
+  needs.
 - **Stage reordering is buttons, not drag-and-drop.** `reorderStages` takes an
   arbitrary ordering, so a drag surface is a UI change only.
-- **Outbound Google actions are not verifiable here.** Sending a templated email
-  and booking a Meet interview are wired end to end (`sendEmail`,
-  `scheduleInterview`, exposed on the application page), but exercising them
-  needs real OAuth credentials, so they are the one path not covered by the
-  automated checks.
+- **Code review is conversational.** You paste code into the challenge assistant
+  and it reviews it; there is no repository integration and nothing executes —
+  that was the explicit scope decision for challenges.

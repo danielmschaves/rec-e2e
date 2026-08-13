@@ -1,7 +1,7 @@
 /**
- * Dev utility: prints the current state of every application, its stage flow
- * and its timeline counts. Handy for checking what the sync/automation engine
- * actually did. Run with: npx tsx scripts/inspect.ts
+ * Dev utility: prints the state of every process you're tracking, its stage
+ * flow and the counts around it. Handy for checking what the sync and
+ * automation engines actually did. Run with: npx tsx scripts/inspect.ts
  */
 import { PrismaClient } from "@prisma/client";
 
@@ -16,42 +16,45 @@ const STATUS_MARK: Record<string, string> = {
 };
 
 async function main() {
-  const applications = await prisma.application.findMany({
+  const opportunities = await prisma.opportunity.findMany({
     include: {
-      candidate: true,
-      job: true,
+      company: true,
       currentStage: true,
       stages: { orderBy: { position: "asc" } },
     },
     orderBy: { createdAt: "asc" },
   });
 
-  for (const app of applications) {
+  for (const o of opportunities) {
     console.log(
-      `\n${app.candidate.fullName} -> ${app.job.title}  [${app.flowMode}] ${app.status}`,
+      `\n${o.company.name} — ${o.roleTitle}  [${o.flowMode}] ${o.status}`,
     );
-    console.log(`  current: ${app.currentStage?.name ?? "(none)"}`);
+    console.log(`  stage:  ${o.currentStage?.name ?? "(none)"}`);
     console.log(
-      "  flow:    " +
-        app.stages
+      "  flow:   " +
+        o.stages
           .map((s) => `${STATUS_MARK[s.status] ?? "?"}${s.key}${s.isCustom ? "*" : ""}`)
           .join(" "),
     );
+    if (o.nextAction) console.log(`  next:   ${o.nextAction}`);
   }
 
-  const [transitions, activities, rules, emails, events, files] = await Promise.all([
-    prisma.stageTransition.count(),
-    prisma.activity.count(),
-    prisma.automationRule.count(),
-    prisma.emailMessage.count(),
-    prisma.calendarEvent.count(),
-    prisma.driveFile.count(),
-  ]);
+  const [transitions, activities, rules, emails, events, files, drafts, challenges] =
+    await Promise.all([
+      prisma.stageTransition.count(),
+      prisma.activity.count(),
+      prisma.automationRule.count(),
+      prisma.emailMessage.count(),
+      prisma.calendarEvent.count(),
+      prisma.driveFile.count(),
+      prisma.emailDraft.count({ where: { status: "DRAFT" } }),
+      prisma.challenge.count(),
+    ]);
 
   console.log(
-    `\nlegend: x=completed >=active .=pending -=skipped *=custom stage\n` +
+    `\nlegend: x=done >=here .=upcoming -=skipped *=their extra step\n` +
       `transitions=${transitions} activities=${activities} rules=${rules} ` +
-      `emails=${emails} events=${events} files=${files}`,
+      `emails=${emails} events=${events} files=${files} drafts=${drafts} challenges=${challenges}`,
   );
 
   await prisma.$disconnect();

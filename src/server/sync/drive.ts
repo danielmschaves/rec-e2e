@@ -1,6 +1,5 @@
 import { prisma } from "@/lib/prisma";
 import { clientForAccount, driveFor } from "@/lib/google";
-import { pickApplication } from "@/server/sync/match";
 import { dispatchEvent } from "@/server/automation";
 import { logActivity } from "@/server/activity";
 import type { GoogleAccount, DriveFileKind } from "@prisma/client";
@@ -10,77 +9,56 @@ import type { drive_v3 } from "googleapis";
 /** Guesses what a document is from its filename. */
 export function inferKind(name: string): DriveFileKind {
   const n = name.toLowerCase();
-  if (/\b(cv|resume|curriculo|currículo)\b/.test(n)) return "RESUME";
+  if (/\b(cv|resume|curriculo|currículo)\b/.test(n)) return "CV";
   if (/cover\s*letter|carta/.test(n)) return "COVER_LETTER";
   if (/offer|proposta/.test(n)) return "OFFER_LETTER";
   if (/portfolio|portf[oó]lio/.test(n)) return "PORTFOLIO";
-  if (/assessment|challenge|test|desafio|teste/.test(n)) return "ASSESSMENT";
-  if (/notes|scorecard|feedback/.test(n)) return "NOTES";
+  if (/brief|spec|assignment|take[-\s]?home/.test(n)) return "CHALLENGE_BRIEF";
+  if (/solution|submission|challenge|desafio/.test(n)) return "CHALLENGE_SOLUTION";
+  if (/research|notes|prep/.test(n)) return "RESEARCH";
   return "OTHER";
 }
 
 /**
- * Drive has no candidate email in its metadata, so we match on the two signals
- * that do exist: the file living in a candidate's folder, or the candidate's
- * name/email appearing in the filename.
+ * Drive metadata has no company address in it, so we match on the two signals
+ * that do exist: the file living in an opportunity's folder, or the company or
+ * role name appearing in the filename ("Acme take-home.md").
  */
 async function matchFile(
-  orgId: string,
+  userId: string,
   file: drive_v3.Schema$File,
-): Promise<{ candidateId: string | null; applicationId: string | null } | null> {
+): Promise<string | null> {
   const parents = file.parents ?? [];
 
   if (parents.length > 0) {
-    const byFolder = await prisma.application.findFirst({
-      where: { orgId, driveFolderId: { in: parents } },
+    const byFolder = await prisma.opportunity.findFirst({
+      where: { userId, driveFolderId: { in: parents } },
     });
-    if (byFolder) {
-      return { candidateId: byFolder.candidateId, applicationId: byFolder.id };
-    }
-
-    const byJobFolder = await prisma.job.findFirst({
-      where: { orgId, driveFolderId: { in: parents } },
-    });
-    if (byJobFolder) {
-      // A job folder tells us the job but not the person — fall through to the
-      // name check below, scoped to that job.
-      const name = file.name?.toLowerCase() ?? "";
-      const candidates = await prisma.candidate.findMany({
-        where: { orgId, applications: { some: { jobId: byJobFolder.id } } },
-      });
-      const hit = candidates.find(
-        (c) =>
-          name.includes(c.fullName.toLowerCase()) ||
-          name.includes(c.email.toLowerCase().split("@")[0]),
-      );
-      if (hit) {
-        const app = await pickApplication(hit.id, byJobFolder.id);
-        return { candidateId: hit.id, applicationId: app?.id ?? null };
-      }
-    }
+    if (byFolder) return byFolder.id;
   }
 
   const name = file.name?.toLowerCase();
   if (!name) return null;
 
-  const candidates = await prisma.candidate.findMany({ where: { orgId } });
-  const hit = candidates.find((c) => {
-    const local = c.email.toLowerCase().split("@")[0];
-    return (
-      name.includes(c.fullName.toLowerCase()) ||
-      (local.length >= 4 && name.includes(local))
-    );
+  const opportunities = await prisma.opportunity.findMany({
+    where: { userId, status: { in: ["ACTIVE", "ON_HOLD", "OFFER"] } },
+    include: { company: true },
+    orderBy: { lastActivityAt: "desc" },
   });
-  if (!hit) return null;
 
-  const app = await pickApplication(hit.id);
-  return { candidateId: hit.id, applicationId: app?.id ?? null };
+  const hit = opportunities.find((o) => {
+    const company = o.company.name.toLowerCase();
+    // Require a reasonably distinctive company name to avoid matching "Co".
+    return company.length >= 3 && name.includes(company);
+  });
+
+  return hit?.id ?? null;
 }
 
-/** Mirrors candidate-related Drive files into the application timeline. */
+/** Mirrors job-search-related Drive files into the right process timeline. */
 export async function syncDrive(
   account: GoogleAccount,
-  orgId: string,
+  userId: string,
   options: { maxFiles?: number } = {},
 ): Promise<SyncResult> {
   const maxFiles = options.maxFiles ?? 200;
@@ -128,20 +106,19 @@ export async function syncDrive(
     if (!file.id || !file.name) continue;
 
     const existing = await prisma.driveFile.findUnique({
-      where: { orgId_googleFileId: { orgId, googleFileId: file.id } },
+      where: { userId_googleFileId: { userId, googleFileId: file.id } },
     });
     if (existing) continue;
 
-    const match = await matchFile(orgId, file);
-    if (!match) continue;
+    const opportunityId = await matchFile(userId, file);
+    if (!opportunityId) continue;
 
     const kind = inferKind(file.name);
 
     await prisma.driveFile.create({
       data: {
-        orgId,
-        applicationId: match.applicationId,
-        candidateId: match.candidateId,
+        userId,
+        opportunityId,
         googleFileId: file.id,
         name: file.name,
         mimeType: file.mimeType ?? "application/octet-stream",
@@ -155,30 +132,23 @@ export async function syncDrive(
     result.linked++;
 
     await logActivity({
-      orgId,
-      applicationId: match.applicationId,
-      candidateId: match.candidateId,
+      userId,
+      opportunityId,
       type: "FILE_ATTACHED",
-      title: `Document added: ${file.name}`,
+      title: `Document: ${file.name}`,
       body: kind.replace("_", " ").toLowerCase(),
       actorType: "SYNC",
       externalId: file.id,
       occurredAt: file.modifiedTime ? new Date(file.modifiedTime) : new Date(),
     });
 
-    if (match.applicationId) {
-      const outcomes = await dispatchEvent({
-        orgId,
-        applicationId: match.applicationId,
-        trigger: "DRIVE_FILE_ADDED",
-        payload: {
-          title: file.name,
-          mimeType: file.mimeType,
-          externalId: file.id,
-        },
-      });
-      result.rulesFired += outcomes.filter((o) => o.applied).length;
-    }
+    const outcomes = await dispatchEvent({
+      userId,
+      opportunityId,
+      trigger: "DRIVE_FILE_ADDED",
+      payload: { title: file.name, mimeType: file.mimeType, externalId: file.id },
+    });
+    result.rulesFired += outcomes.filter((o) => o.applied).length;
   }
 
   if (newStartPageToken) {
@@ -189,38 +159,4 @@ export async function syncDrive(
   }
 
   return result;
-}
-
-/** Creates (once) a Drive folder for an application's documents. */
-export async function ensureApplicationFolder(params: {
-  account: GoogleAccount;
-  applicationId: string;
-}): Promise<string | null> {
-  const application = await prisma.application.findUnique({
-    where: { id: params.applicationId },
-    include: { candidate: true, job: true },
-  });
-  if (!application) return null;
-  if (application.driveFolderId) return application.driveFolderId;
-
-  const auth = await clientForAccount(params.account);
-  const drive = driveFor(auth);
-
-  const res = await drive.files.create({
-    requestBody: {
-      name: `${application.candidate.fullName} — ${application.job.title}`,
-      mimeType: "application/vnd.google-apps.folder",
-      parents: application.job.driveFolderId ? [application.job.driveFolderId] : undefined,
-    },
-    fields: "id",
-  });
-
-  const folderId = res.data.id ?? null;
-  if (folderId) {
-    await prisma.application.update({
-      where: { id: application.id },
-      data: { driveFolderId: folderId },
-    });
-  }
-  return folderId;
 }

@@ -2,128 +2,115 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
   Briefcase,
-  Users,
   CalendarClock,
   AlertTriangle,
   ArrowRight,
-  Zap,
+  Mail,
+  Code2,
+  CheckCircle2,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Shell, PageHeader } from "@/components/Shell";
 import { ActivityFeed } from "@/components/ActivityFeed";
-import { initials, avatarTint, relativeTime, formatDateTime } from "@/lib/ui";
+import {
+  initials,
+  tint,
+  relativeTime,
+  formatDateTime,
+  formatDate,
+  OPPORTUNITY_STATUS_STYLE,
+  humanise,
+} from "@/lib/ui";
 
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
-  const orgId = user.orgId;
+  const userId = user.id;
 
   const weekAhead = new Date();
   weekAhead.setDate(weekAhead.getDate() + 7);
+  const now = new Date();
 
   const [
-    openJobs,
-    activeApplications,
-    upcomingInterviews,
+    active,
+    offers,
+    upcoming,
     flagged,
     activities,
-    byStageType,
-    recentApplications,
-    hiredThisMonth,
+    nextActions,
+    drafts,
+    challenges,
+    quiet,
   ] = await Promise.all([
-    prisma.job.count({ where: { orgId, status: "OPEN" } }),
-    prisma.application.count({ where: { orgId, status: "ACTIVE" } }),
+    prisma.opportunity.count({ where: { userId, status: { in: ["ACTIVE", "ON_HOLD"] } } }),
+    prisma.opportunity.count({ where: { userId, status: "OFFER" } }),
     prisma.calendarEvent.findMany({
-      where: {
-        orgId,
-        status: "CONFIRMED",
-        startsAt: { gte: new Date(), lte: weekAhead },
-      },
-      include: { application: { include: { candidate: true, job: true } } },
+      where: { userId, status: "CONFIRMED", startsAt: { gte: now, lte: weekAhead } },
+      include: { opportunity: { include: { company: true } } },
       orderBy: { startsAt: "asc" },
       take: 5,
     }),
     prisma.activity.findMany({
-      where: { orgId, type: "FLAGGED" },
-      include: { application: { include: { candidate: true, job: true } } },
+      where: { userId, type: "FLAGGED" },
+      include: { opportunity: { include: { company: true } } },
       orderBy: { occurredAt: "desc" },
       take: 5,
     }),
     prisma.activity.findMany({
-      where: { orgId },
-      include: { application: { include: { candidate: true, job: true } } },
+      where: { userId },
+      include: { opportunity: { include: { company: true } } },
       orderBy: { occurredAt: "desc" },
       take: 12,
     }),
-    prisma.applicationStage.groupBy({
-      by: ["type"],
-      where: { status: "ACTIVE", application: { orgId, status: "ACTIVE" } },
-      _count: { _all: true },
-    }),
-    prisma.application.findMany({
-      where: { orgId, status: "ACTIVE" },
-      include: { candidate: true, job: true, currentStage: true },
-      orderBy: { lastActivityAt: "desc" },
+    prisma.opportunity.findMany({
+      where: {
+        userId,
+        status: { in: ["ACTIVE", "ON_HOLD", "OFFER"] },
+        nextAction: { not: null },
+      },
+      include: { company: true, currentStage: true },
+      orderBy: [{ nextActionAt: "asc" }, { lastActivityAt: "desc" }],
       take: 6,
     }),
-    prisma.application.count({
+    prisma.emailDraft.findMany({
+      where: { userId, status: "DRAFT" },
+      include: { opportunity: { include: { company: true } } },
+      orderBy: { createdAt: "desc" },
+      take: 4,
+    }),
+    prisma.challenge.findMany({
+      where: { userId, status: { in: ["PLANNING", "IN_PROGRESS", "READY_FOR_REVIEW"] } },
+      include: { opportunity: { include: { company: true } }, requirements: true },
+      orderBy: { deadline: "asc" },
+      take: 4,
+    }),
+    prisma.opportunity.findMany({
       where: {
-        orgId,
-        status: "HIRED",
-        updatedAt: {
-          gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
-        },
+        userId,
+        status: { in: ["ACTIVE", "OFFER"] },
+        currentStage: { chaseAt: { lt: now }, status: "ACTIVE" },
       },
+      include: { company: true, currentStage: true },
+      orderBy: { lastActivityAt: "asc" },
+      take: 5,
     }),
   ]);
 
-  const stageOrder = [
-    "SOURCED",
-    "APPLIED",
-    "SCREENING",
-    "ASSESSMENT",
-    "INTERVIEW",
-    "REFERENCE_CHECK",
-    "OFFER",
-  ];
-  const funnel = stageOrder
-    .map((type) => ({
-      type,
-      count: byStageType.find((s) => s.type === type)?._count._all ?? 0,
-    }))
-    .filter((s) => s.count > 0);
-  const funnelMax = Math.max(1, ...funnel.map((s) => s.count));
-
   const stats = [
-    { label: "Open roles", value: openJobs, icon: Briefcase, href: "/jobs" },
-    {
-      label: "Active candidates",
-      value: activeApplications,
-      icon: Users,
-      href: "/candidates",
-    },
-    {
-      label: "Interviews this week",
-      value: upcomingInterviews.length,
-      icon: CalendarClock,
-      href: "/jobs",
-    },
-    {
-      label: "Hired this month",
-      value: hiredThisMonth,
-      icon: Zap,
-      href: "/candidates",
-    },
+    { label: "Live processes", value: active, icon: Briefcase, href: "/processes" },
+    { label: "Offers", value: offers, icon: CheckCircle2, href: "/processes" },
+    { label: "Interviews this week", value: upcoming.length, icon: CalendarClock, href: "/processes" },
+    { label: "Drafts to review", value: drafts.length, icon: Mail, href: "/drafts" },
   ];
 
   return (
-    <Shell user={user} active="/">
+    <Shell user={user} active="/" badges={{ "/drafts": drafts.length }}>
       <PageHeader
-        title={`Good to see you, ${user.name.split(" ")[0]}`}
-        subtitle="Everything moving through your process right now."
+        title={`Morning, ${user.name.split(" ")[0]}`}
+        subtitle="Everything you owe, and everything owed to you."
       />
 
       <div className="space-y-6 p-6">
@@ -153,34 +140,42 @@ export default async function DashboardPage() {
 
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="space-y-6 lg:col-span-2">
-            {flagged.length > 0 && (
-              <section className="rounded-xl border border-amber-200 bg-amber-50/60 p-5">
-                <div className="flex items-center gap-2">
-                  <AlertTriangle className="h-4 w-4 text-amber-600" strokeWidth={2} />
-                  <h2 className="text-sm font-semibold text-amber-900">
-                    Needs your attention
-                  </h2>
+            {nextActions.length > 0 && (
+              <section className="rounded-xl border border-slate-200 bg-white">
+                <div className="border-b border-slate-200 px-5 py-3.5">
+                  <h2 className="text-sm font-semibold text-slate-900">Your move</h2>
                 </div>
-                <ul className="mt-3 space-y-2">
-                  {flagged.map((item) => (
-                    <li key={item.id}>
+                <ul className="divide-y divide-slate-100">
+                  {nextActions.map((o) => (
+                    <li key={o.id}>
                       <Link
-                        href={
-                          item.applicationId
-                            ? `/applications/${item.applicationId}`
-                            : "/jobs"
-                        }
-                        className="flex items-center justify-between gap-3 rounded-lg bg-white/70 px-3 py-2 text-sm transition-colors hover:bg-white"
+                        href={`/processes/${o.id}`}
+                        className="flex items-center gap-3 px-5 py-3 transition-colors hover:bg-slate-50"
                       >
-                        <span className="min-w-0">
-                          <span className="font-medium text-slate-900">
-                            {item.application?.candidate.fullName ?? "Application"}
+                        <div
+                          className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg text-xs font-semibold ${tint(
+                            o.company.name,
+                          )}`}
+                        >
+                          {initials(o.company.name)}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium text-slate-900">
+                            {o.nextAction}
+                          </div>
+                          <div className="truncate text-xs text-slate-500">
+                            {o.company.name} · {o.currentStage?.name ?? "—"}
+                          </div>
+                        </div>
+                        {o.nextActionAt && (
+                          <span
+                            className={`shrink-0 text-xs ${
+                              o.nextActionAt < now ? "text-rose-600" : "text-slate-400"
+                            }`}
+                          >
+                            {relativeTime(o.nextActionAt)}
                           </span>
-                          <span className="ml-2 text-slate-500">{item.title}</span>
-                        </span>
-                        <span className="shrink-0 text-xs text-slate-400">
-                          {relativeTime(item.occurredAt)}
-                        </span>
+                        )}
                       </Link>
                     </li>
                   ))}
@@ -188,48 +183,57 @@ export default async function DashboardPage() {
               </section>
             )}
 
-            <section className="rounded-xl border border-slate-200 bg-white">
-              <div className="border-b border-slate-200 px-5 py-3.5">
-                <h2 className="text-sm font-semibold text-slate-900">
-                  Where candidates are right now
-                </h2>
-              </div>
-              <div className="p-5">
-                {funnel.length === 0 ? (
-                  <p className="text-sm text-slate-500">
-                    No active candidates yet. Add one from a job page.
-                  </p>
-                ) : (
-                  <div className="space-y-3">
-                    {funnel.map((step) => (
-                      <div key={step.type} className="flex items-center gap-3">
-                        <span className="w-32 shrink-0 text-xs font-medium text-slate-600">
-                          {step.type.replace("_", " ").toLowerCase()}
+            {(quiet.length > 0 || flagged.length > 0) && (
+              <section className="rounded-xl border border-amber-200 bg-amber-50/60 p-5">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 text-amber-600" strokeWidth={2} />
+                  <h2 className="text-sm font-semibold text-amber-900">Worth a nudge</h2>
+                </div>
+                <ul className="mt-3 space-y-2">
+                  {quiet.map((o) => (
+                    <li key={o.id}>
+                      <Link
+                        href={`/processes/${o.id}`}
+                        className="flex items-center justify-between gap-3 rounded-lg bg-white/70 px-3 py-2 text-sm transition-colors hover:bg-white"
+                      >
+                        <span className="min-w-0">
+                          <span className="font-medium text-slate-900">{o.company.name}</span>
+                          <span className="ml-2 text-slate-500">
+                            quiet on {o.currentStage?.name}
+                          </span>
                         </span>
-                        <div className="h-6 flex-1 overflow-hidden rounded-md bg-slate-100">
-                          <div
-                            className="flex h-full items-center justify-end rounded-md bg-indigo-500 px-2 text-xs font-medium text-white transition-all"
-                            style={{
-                              width: `${Math.max(8, (step.count / funnelMax) * 100)}%`,
-                            }}
-                          >
-                            {step.count}
-                          </div>
-                        </div>
-                      </div>
+                        <span className="shrink-0 text-xs text-slate-400">
+                          {relativeTime(o.lastActivityAt)}
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                  {flagged
+                    .filter((f) => !quiet.some((q) => q.id === f.opportunityId))
+                    .map((item) => (
+                      <li key={item.id}>
+                        <Link
+                          href={
+                            item.opportunityId ? `/processes/${item.opportunityId}` : "/processes"
+                          }
+                          className="flex items-center justify-between gap-3 rounded-lg bg-white/70 px-3 py-2 text-sm transition-colors hover:bg-white"
+                        >
+                          <span className="min-w-0 truncate text-slate-700">{item.title}</span>
+                          <span className="shrink-0 text-xs text-slate-400">
+                            {relativeTime(item.occurredAt)}
+                          </span>
+                        </Link>
+                      </li>
                     ))}
-                  </div>
-                )}
-              </div>
-            </section>
+                </ul>
+              </section>
+            )}
 
             <section className="rounded-xl border border-slate-200 bg-white">
               <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3.5">
-                <h2 className="text-sm font-semibold text-slate-900">
-                  Recent activity
-                </h2>
+                <h2 className="text-sm font-semibold text-slate-900">Recent activity</h2>
                 <span className="text-xs text-slate-400">
-                  Synced from Gmail, Calendar and Drive
+                  Mail, interviews and files sync automatically
                 </span>
               </div>
               <div className="p-5">
@@ -239,26 +243,81 @@ export default async function DashboardPage() {
           </div>
 
           <div className="space-y-6">
+            {drafts.length > 0 && (
+              <section className="rounded-xl border border-violet-200 bg-white">
+                <div className="flex items-center gap-2 border-b border-slate-200 px-5 py-3.5">
+                  <Mail className="h-4 w-4 text-violet-600" strokeWidth={2} />
+                  <h2 className="text-sm font-semibold text-slate-900">Waiting on you</h2>
+                </div>
+                <ul className="divide-y divide-slate-100">
+                  {drafts.map((draft) => (
+                    <li key={draft.id}>
+                      <Link
+                        href="/drafts"
+                        className="block px-5 py-3 transition-colors hover:bg-slate-50"
+                      >
+                        <div className="truncate text-sm font-medium text-slate-900">
+                          {draft.subject}
+                        </div>
+                        <div className="truncate text-xs text-slate-500">
+                          {draft.opportunity?.company.name ?? draft.toEmail} · drafted{" "}
+                          {relativeTime(draft.createdAt)}
+                        </div>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            {challenges.length > 0 && (
+              <section className="rounded-xl border border-slate-200 bg-white">
+                <div className="flex items-center gap-2 border-b border-slate-200 px-5 py-3.5">
+                  <Code2 className="h-4 w-4 text-slate-400" strokeWidth={2} />
+                  <h2 className="text-sm font-semibold text-slate-900">Challenges</h2>
+                </div>
+                <ul className="divide-y divide-slate-100">
+                  {challenges.map((c) => {
+                    const done = c.requirements.filter((r) => r.done).length;
+                    return (
+                      <li key={c.id}>
+                        <Link
+                          href={`/challenges/${c.id}`}
+                          className="block px-5 py-3 transition-colors hover:bg-slate-50"
+                        >
+                          <div className="truncate text-sm font-medium text-slate-900">
+                            {c.title}
+                          </div>
+                          <div className="text-xs text-slate-500">
+                            {c.opportunity.company.name} · {done}/{c.requirements.length} done
+                            {c.deadline && ` · due ${formatDate(c.deadline)}`}
+                          </div>
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            )}
+
             <section className="rounded-xl border border-slate-200 bg-white">
               <div className="border-b border-slate-200 px-5 py-3.5">
-                <h2 className="text-sm font-semibold text-slate-900">
-                  Upcoming interviews
-                </h2>
+                <h2 className="text-sm font-semibold text-slate-900">Upcoming</h2>
               </div>
               <div className="p-3">
-                {upcomingInterviews.length === 0 ? (
+                {upcoming.length === 0 ? (
                   <p className="px-2 py-3 text-sm text-slate-500">
-                    Nothing scheduled in the next 7 days.
+                    Nothing booked in the next 7 days.
                   </p>
                 ) : (
                   <ul className="space-y-1">
-                    {upcomingInterviews.map((event) => (
+                    {upcoming.map((event) => (
                       <li key={event.id}>
                         <Link
                           href={
-                            event.applicationId
-                              ? `/applications/${event.applicationId}`
-                              : "/"
+                            event.opportunityId
+                              ? `/processes/${event.opportunityId}`
+                              : "/processes"
                           }
                           className="block rounded-lg px-2 py-2 transition-colors hover:bg-slate-50"
                         >
@@ -267,8 +326,7 @@ export default async function DashboardPage() {
                           </div>
                           <div className="mt-0.5 text-xs text-slate-500">
                             {formatDateTime(event.startsAt)}
-                            {event.application &&
-                              ` · ${event.application.candidate.fullName}`}
+                            {event.opportunity && ` · ${event.opportunity.company.name}`}
                           </div>
                         </Link>
                       </li>
@@ -276,45 +334,6 @@ export default async function DashboardPage() {
                   </ul>
                 )}
               </div>
-            </section>
-
-            <section className="rounded-xl border border-slate-200 bg-white">
-              <div className="border-b border-slate-200 px-5 py-3.5">
-                <h2 className="text-sm font-semibold text-slate-900">
-                  Recently active
-                </h2>
-              </div>
-              <ul className="divide-y divide-slate-100">
-                {recentApplications.map((application) => (
-                  <li key={application.id}>
-                    <Link
-                      href={`/applications/${application.id}`}
-                      className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-slate-50"
-                    >
-                      <div
-                        className={`grid h-8 w-8 shrink-0 place-items-center rounded-full text-xs font-semibold ${avatarTint(
-                          application.candidate.email,
-                        )}`}
-                      >
-                        {initials(application.candidate.fullName)}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-slate-900">
-                          {application.candidate.fullName}
-                        </div>
-                        <div className="truncate text-xs text-slate-500">
-                          {application.currentStage?.name ?? "—"} ·{" "}
-                          {application.job.title}
-                        </div>
-                      </div>
-                      <ArrowRight
-                        className="h-4 w-4 shrink-0 text-slate-300 transition-colors group-hover:text-indigo-500"
-                        strokeWidth={2}
-                      />
-                    </Link>
-                  </li>
-                ))}
-              </ul>
             </section>
           </div>
         </div>
