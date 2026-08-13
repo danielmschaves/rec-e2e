@@ -8,6 +8,7 @@ import {
   Mail,
   Code2,
   CheckCircle2,
+  Inbox,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
@@ -44,6 +45,7 @@ export default async function DashboardPage() {
     drafts,
     challenges,
     quiet,
+    detected,
   ] = await Promise.all([
     prisma.opportunity.count({ where: { userId, status: { in: ["ACTIVE", "ON_HOLD"] } } }),
     prisma.opportunity.count({ where: { userId, status: "OFFER" } }),
@@ -97,6 +99,12 @@ export default async function DashboardPage() {
       orderBy: { lastActivityAt: "asc" },
       take: 5,
     }),
+    prisma.opportunity.findMany({
+      where: { userId, autoDetected: true, confirmedAt: null },
+      include: { company: true },
+      orderBy: { appliedAt: "desc" },
+      take: 6,
+    }),
   ]);
 
   const stats = [
@@ -140,6 +148,40 @@ export default async function DashboardPage() {
 
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="space-y-6 lg:col-span-2">
+            {detected.length > 0 && (
+              <section className="rounded-xl border border-sky-200 bg-sky-50/60 p-5">
+                <div className="flex items-center gap-2">
+                  <Inbox className="h-4 w-4 text-sky-600" strokeWidth={2} />
+                  <h2 className="text-sm font-semibold text-sky-900">
+                    Picked up from your inbox
+                  </h2>
+                </div>
+                <p className="mt-1 text-xs text-sky-800/80">
+                  Already tracked — open one to check the role is right.
+                </p>
+                <ul className="mt-3 space-y-2">
+                  {detected.map((o) => (
+                    <li key={o.id}>
+                      <Link
+                        href={`/processes/${o.id}`}
+                        className="flex items-center justify-between gap-3 rounded-lg bg-white/70 px-3 py-2 text-sm transition-colors hover:bg-white"
+                      >
+                        <span className="min-w-0">
+                          <span className="font-medium text-slate-900">
+                            {o.company.name}
+                          </span>
+                          <span className="ml-2 text-slate-500">{o.roleTitle}</span>
+                        </span>
+                        <span className="shrink-0 text-xs text-slate-400">
+                          via {o.detectedFrom} · {relativeTime(o.appliedAt)}
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
             {nextActions.length > 0 && (
               <section className="rounded-xl border border-slate-200 bg-white">
                 <div className="border-b border-slate-200 px-5 py-3.5">

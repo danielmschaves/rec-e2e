@@ -149,6 +149,44 @@ exactly one place — the `sendDraftAction` server action behind the Drafts page
 button. This is a structural guarantee rather than an instruction the model
 could be talked out of, and `assistant-check.ts` asserts it on every run.
 
+## Application detection — how a process starts itself
+
+Applying is the only manual step. Everything after it starts from the receipt
+you always get back, from LinkedIn or the company's ATS.
+
+`src/server/sync/detect.ts` runs inside the Gmail sync, at the point where
+unmatched mail would otherwise be discarded. Three layers, cheapest first:
+
+1. **A prefilter.** Does the mail contain a confirmation marker ("your
+   application", "thanks for applying", "recebemos a sua candidatura") and *not*
+   a negative one ("job alert", "not moving forward")? Deliberately generous —
+   a false positive here costs one regex pass, a false negative loses the
+   application entirely.
+2. **Deterministic parsers.** LinkedIn, Greenhouse, Lever, Ashby, Workday and
+   the rest have stable formats, so an ordered pattern list extracts company and
+   role exactly, at zero cost. This covers the large majority.
+3. **The model.** Only when the parsers find nothing does a structured-output
+   call extract `{isApplicationConfirmation, company, role}`. It runs at `low`
+   effort — this is extraction, not reasoning.
+
+A hit creates the Company (if new), instantiates your default flow, and moves
+straight to the `APPLIED` stage rather than the `RESEARCHING` one the template
+opens on — the confirmation is proof you already applied.
+
+Three details that matter more than they look:
+
+- **Relay domains are never written onto a Company.** `linkedin.com` and
+  `greenhouse.io` send on behalf of every employer; recording one as Acme's
+  domain would route all future LinkedIn mail to Acme. Only a company's own
+  sending domain is adopted.
+- **The confirmation does not fire the automation rules.** It created the
+  process; treating it as "they replied" would complete the Applied stage the
+  instant it was entered.
+- **Detected rows are live, not pending.** They appear in the tracker
+  immediately, with a banner naming the source and offering a one-click role
+  correction or "not mine". Requiring confirmation before anything worked would
+  break the promise that this is automatic.
+
 ## Background work
 
 Docker runs a BullMQ worker with a repeatable job syncing every
@@ -185,15 +223,21 @@ Called out so they read as decisions, not oversights:
 - **No streaming.** The assistant replies in one shot with a pending state.
   Streaming would want an API route and client-side accumulation; the tracker
   reads fine without it.
-- **Single user per deployment.** Every query filters by `userId` and server
-  actions verify ownership, so the model is ready for more — but sign-in creates
-  or finds one account with no tenant resolution.
 - **Push, not poll, is the endgame.** Gmail `watch` + Pub/Sub and Calendar push
   channels would cut latency to seconds. The cursor fields (`gmailHistoryId`,
   `calendarSyncToken`, `driveStartPageToken`) are already what a webhook handler
   needs.
 - **Stage reordering is buttons, not drag-and-drop.** `reorderStages` takes an
   arbitrary ordering, so a drag surface is a UI change only.
+- **Detection is inbox-only.** If a company never emails a receipt, nothing
+  appears — add it by hand. There is no LinkedIn API integration; the LinkedIn
+  path works because LinkedIn emails you, which is also why it needs no
+  credentials beyond Gmail.
+- **Multi-user works, but has no admin surface.** Each Google sign-in creates
+  its own `User` with fully isolated data, and every query and server action is
+  scoped to it. What is missing is a signup allowlist, per-user assistant spend
+  limits, and any notion of roles. `DEV_LOGIN` must stay off — it lists every
+  account and signs you in as any of them.
 - **Code review is conversational.** You paste code into the challenge assistant
   and it reviews it; there is no repository integration and nothing executes —
   that was the explicit scope decision for challenges.

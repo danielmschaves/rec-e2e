@@ -34,11 +34,26 @@ only you can.
 | **Assistant** | In context on every process and challenge; reads real state via tools |
 | **Drafts** | AI-written email you review and send — the assistant has no send path |
 | **Challenges** | Paste a take-home brief → checkable requirements, a plan, a deadline |
+| **Auto-tracking** | Application confirmations from LinkedIn/ATS become tracked processes |
 | **Gmail sync** | Files recruiter correspondence onto the right process |
 | **Calendar sync** | An invite moves the stage; the interview ending advances it |
 | **Drive sync** | Picks up briefs, CVs and solutions named after a company |
 | **Automations** | Rules mapping each signal to a process change — editable, not hard-coded |
 | **Audit trail** | Every change records whether it was you, a rule, sync, or the assistant |
+
+## Applying is the only manual step
+
+When you apply, something always emails you a receipt. The Gmail sync reads it,
+works out the company and role, and creates the tracked process for you —
+starting on **Applied**, not Researching.
+
+Known senders (LinkedIn, Greenhouse, Lever, Ashby, Workday, Workable,
+SmartRecruiters, …) are parsed deterministically at zero cost; anything else
+falls back to a cheap structured-output call. Job alerts, newsletters and
+rejections are filtered out before either runs.
+
+Detected processes are live immediately, with a banner naming the source and a
+one-click role correction — or "not mine" if the guess was wrong.
 
 ## The one safety rule
 
@@ -134,6 +149,7 @@ anywhere real — it bypasses authentication by design.
 ```bash
 npx tsx scripts/e2e-check.ts        # 31 assertions: engine, automations, tools
 npx tsx scripts/assistant-check.ts  # 23 assertions: the agent loop, no API key needed
+npx tsx scripts/detection-check.ts  # 27 assertions: real ATS emails → tracked process
 node scripts/smoke.mjs              # drives the UI in a real browser, screenshots
 npx tsx scripts/inspect.ts          # prints every process and its stage flow
 curl localhost:3000/api/health      # database + redis liveness
@@ -143,7 +159,17 @@ curl localhost:3000/api/health      # database + redis liveness
 standard flow, personalisation, each automation trigger, the assistant's tools —
 then deletes what it made. `assistant-check` drives the real agent loop against
 a stubbed model, so it verifies tool dispatch, transcript persistence, history
-replay and the never-sends guarantee **without** an API key.
+replay and the never-sends guarantee **without** an API key. `detection-check`
+runs realistic confirmation emails from seven systems through the parsers, and
+asserts that job alerts and rejections create nothing.
+
+## Multiple people
+
+Yes. Each Google sign-in creates its own account with fully isolated data —
+every query filters by user and every server action re-checks ownership before
+writing. Before putting it in front of others: keep `DEV_LOGIN` unset (it lists
+every account and lets you sign in as any of them), add a signup allowlist, and
+cap assistant spend per user.
 
 ## Layout
 
@@ -152,7 +178,7 @@ prisma/schema.prisma       data model (see docs/ARCHITECTURE.md)
 src/server/opportunities   stage engine: create, move, personalise
 src/server/automation      rule engine: triggers, conditions, actions
 src/server/ai/             client, tools, the agent loop
-src/server/sync/           gmail.ts, calendar.ts, drive.ts, match.ts
+src/server/sync/           gmail.ts, calendar.ts, drive.ts, match.ts, detect.ts
 src/app/                   Next.js App Router pages and server actions
 worker/                    BullMQ consumer + repeatable sync schedule
 scripts/                   e2e-check, assistant-check, smoke, inspect

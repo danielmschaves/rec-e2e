@@ -10,6 +10,7 @@ import {
   Mail,
   Code2,
   Users,
+  Inbox,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
@@ -26,6 +27,8 @@ import {
   setStatusAction,
   setNextActionAction,
   createChallengeAction,
+  confirmDetectionAction,
+  dismissDetectionAction,
 } from "@/app/actions";
 import {
   initials,
@@ -121,6 +124,54 @@ export default async function ProcessPage({
 
       <div className="grid gap-6 p-6 xl:grid-cols-[1fr_400px]">
         <div className="min-w-0 space-y-6">
+          {/* Auto-detected banner — shown until you confirm or correct it */}
+          {opportunity.autoDetected && !opportunity.confirmedAt && (
+            <section className="rounded-xl border border-sky-200 bg-sky-50/60 p-4">
+              <div className="flex items-start gap-2">
+                <Inbox className="mt-0.5 h-4 w-4 shrink-0 text-sky-600" strokeWidth={2} />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-slate-800">
+                    Picked this up from your inbox — a confirmation from{" "}
+                    <strong>{opportunity.detectedFrom}</strong>. It&apos;s already
+                    being tracked; just check the role is right.
+                  </p>
+                  <form
+                    action={confirmDetectionAction}
+                    className="mt-3 flex flex-wrap items-end gap-2"
+                  >
+                    <input type="hidden" name="opportunityId" value={opportunity.id} />
+                    <label className="min-w-48 flex-1">
+                      <span className="mb-1 block text-xs font-medium text-slate-600">
+                        Role
+                      </span>
+                      <input
+                        name="roleTitle"
+                        defaultValue={opportunity.roleTitle}
+                        className={inputClass}
+                      />
+                    </label>
+                    <button
+                      type="submit"
+                      className="rounded-lg bg-sky-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-700"
+                    >
+                      Looks right
+                    </button>
+                  </form>
+                </div>
+                <form action={dismissDetectionAction} className="shrink-0">
+                  <input type="hidden" name="opportunityId" value={opportunity.id} />
+                  <button
+                    type="submit"
+                    title="I didn't apply here — remove it"
+                    className="rounded-lg px-2 py-1 text-xs text-slate-500 transition-colors hover:bg-white hover:text-rose-600"
+                  >
+                    Not mine
+                  </button>
+                </form>
+              </div>
+            </section>
+          )}
+
           {/* Next action */}
           <section className="rounded-xl border border-slate-200 bg-white p-4">
             <form action={setNextActionAction} className="flex flex-wrap items-end gap-2">

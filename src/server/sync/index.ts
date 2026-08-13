@@ -10,6 +10,8 @@ export type ProviderResult = {
   seen: number;
   linked: number;
   rulesFired: number;
+  /** New processes created from application confirmations. */
+  detected: number;
   error?: string;
 };
 
@@ -28,7 +30,7 @@ export async function syncAccount(userId: string): Promise<ProviderResult[]> {
 
   const providers: Array<{
     provider: SyncProvider;
-    run: () => Promise<{ seen: number; linked: number; rulesFired: number }>;
+    run: () => Promise<{ seen: number; linked: number; rulesFired: number; detected: number }>;
   }> = [
     { provider: "GMAIL", run: () => syncGmail(account, userId) },
     { provider: "CALENDAR", run: () => syncCalendar(account, userId) },
@@ -63,7 +65,7 @@ export async function syncAccount(userId: string): Promise<ProviderResult[]> {
         where: { id: account.id },
         data: { lastError: message.slice(0, 500) },
       });
-      results.push({ provider, seen: 0, linked: 0, rulesFired: 0, error: message });
+      results.push({ provider, seen: 0, linked: 0, rulesFired: 0, detected: 0, error: message });
     }
   }
 

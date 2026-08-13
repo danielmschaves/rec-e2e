@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { clientForAccount, gmailFor, parseAddress, parseAddressList } from "@/lib/google";
 import { matchByEmails } from "@/server/sync/match";
+import { detectApplication, createFromDetection } from "@/server/sync/detect";
 import { dispatchEvent } from "@/server/automation";
 import { logActivity } from "@/server/activity";
 import type { GoogleAccount } from "@prisma/client";
@@ -10,6 +11,8 @@ export type SyncResult = {
   seen: number;
   linked: number;
   rulesFired: number;
+  /** New processes created from application confirmations. */
+  detected: number;
   error?: string;
 };
 
@@ -63,7 +66,7 @@ export async function syncGmail(
   const backfillDays = options.backfillDays ?? 30;
   const maxMessages = options.maxMessages ?? 100;
 
-  const result: SyncResult = { seen: 0, linked: 0, rulesFired: 0 };
+  const result: SyncResult = { seen: 0, linked: 0, rulesFired: 0, detected: 0 };
 
   const auth = await clientForAccount(account);
   const gmail = gmailFor(auth);
@@ -143,10 +146,39 @@ export async function syncGmail(
       [subject, bodyText?.slice(0, 2000)].filter(Boolean).join("\n"),
     );
 
-    // Unmatched mail is ordinary inbox traffic — skip it rather than copying
-    // your whole mailbox into the tracker.
-    if (!match?.opportunity) continue;
-    const opportunity = match.opportunity;
+    let opportunity = match?.opportunity ?? null;
+    let detectedNew = false;
+
+    // Nothing matched. Before discarding, check whether this is a confirmation
+    // that you applied somewhere new — that is how a process gets tracked
+    // without you typing anything.
+    if (!opportunity && direction === "INBOUND") {
+      const detected = await detectApplication({
+        fromEmail: from.email,
+        fromName: from.name,
+        subject,
+        body: bodyText,
+      });
+
+      if (detected) {
+        const created = await createFromDetection({
+          userId,
+          detected,
+          gmailId: id,
+          receivedAt: sentAt,
+          senderEmail: from.email,
+        });
+        if (created) {
+          opportunity = created;
+          detectedNew = true;
+          result.detected++;
+        }
+      }
+    }
+
+    // Still nothing — ordinary inbox traffic. Skip it rather than copying your
+    // whole mailbox into the tracker.
+    if (!opportunity) continue;
 
     await prisma.emailMessage.create({
       data: {
@@ -188,8 +220,13 @@ export async function syncGmail(
       actorType: "SYNC",
       externalId: id,
       occurredAt: sentAt,
-      meta: { matchedVia: match.via },
+      meta: { matchedVia: match?.via ?? "detected" },
     });
+
+    // The confirmation that created a process must not also be treated as
+    // "they replied" — that would complete the Applied stage the instant it
+    // was entered.
+    if (detectedNew) continue;
 
     const outcomes = await dispatchEvent({
       userId,

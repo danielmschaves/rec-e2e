@@ -77,12 +77,31 @@ try {
   await expectText(page, "Live processes", "dashboard rendered");
   await shot(page, "dashboard");
 
-  console.log("3. Processes list");
+  console.log("3. Inbox-detected process surfaces for review");
+  await expectText(page, "Picked up from your inbox", "detection strip on the dashboard");
+  await page.getByRole("link", { name: /Halcyon Systems/ }).first().click();
+  await page.waitForURL(/\/processes\/[^/]+$/, { timeout: 20000 });
+  await expectText(page, "Picked this up from your inbox", "detection banner on the process");
+  await expectText(page, "Applied", "detected process starts on Applied, not Researching");
+  await shot(page, "detected-process");
+  await page.getByRole("button", { name: "Looks right" }).click();
+  // Confirming clears the banner; the strip on the dashboard goes with it.
+  try {
+    await page
+      .getByText("Picked this up from your inbox")
+      .first()
+      .waitFor({ state: "detached", timeout: 15000 });
+    console.log("  ok: confirming clears the banner");
+  } catch {
+    problems.push("banner did not clear after confirming the detection");
+  }
+
+  console.log("4. Processes list");
   await go(page, "/processes");
   await expectText(page, "Nimbus Data", "processes list rendered");
   await shot(page, "processes");
 
-  console.log("4. Track a new process");
+  console.log("5. Track a new process");
   await page.fill('input[name="companyName"]', companyName);
   await page.fill('input[name="roleTitle"]', "Principal Engineer");
   await page.fill('input[name="companyDomain"]', `smoke-${stamp}.example`);
@@ -94,26 +113,26 @@ try {
   const processUrl = page.url();
   await shot(page, "process-standard");
 
-  console.log("5. Personalise — they added a step");
+  console.log("6. Personalise — they added a step");
   await page.fill('input[name="name"]', "Pairing session");
   await page.getByRole("button", { name: "Add step" }).click();
   await expectText(page, "Pairing session", "custom step appears in the tracker");
   await expectText(page, "Diverged from your flow", "process is marked as diverged");
   await shot(page, "process-personalised");
 
-  console.log("6. Personalise — they skipped a step");
+  console.log("7. Personalise — they skipped a step");
   const takeHomeRow = page.locator("li").filter({ hasText: "Take-home" }).first();
   await takeHomeRow.hover();
   await takeHomeRow.locator('button[title="They skipped this step"]').click();
   await expectText(page, 'Skipped "Take-home"', "skip is recorded on the timeline");
   await shot(page, "process-skipped");
 
-  console.log("7. Advance the stage");
+  console.log("8. Advance the stage");
   await page.getByRole("button", { name: /^Next stage$/ }).click();
   await expectText(page, "Applied", "advancing moved the stage");
   await shot(page, "process-advanced");
 
-  console.log("8. Record a next action");
+  console.log("9. Record a next action");
   await page.goto(processUrl, { waitUntil: "domcontentloaded" });
   await page.fill('input[name="action"]', `Chase them ${stamp}`);
   await page.getByRole("button", { name: "Save" }).first().click();
@@ -128,7 +147,7 @@ try {
     problems.push("next action was not persisted back into the form");
   }
 
-  console.log("9. Add a challenge");
+  console.log("10. Add a challenge");
   await page.fill('input[name="title"]', "Smoke take-home");
   await page.fill('textarea[name="brief"]', "Build a small service. Include tests.");
   await page.getByRole("button", { name: "Add challenge" }).click();
@@ -137,7 +156,7 @@ try {
   await expectText(page, "The brief", "brief section rendered");
   await shot(page, "challenge");
 
-  console.log("10. Add a requirement and tick it");
+  console.log("11. Add a requirement and tick it");
   await page.fill('input[name="text"]', "Ship a README");
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await expectText(page, "Ship a README", "requirement added");
@@ -150,7 +169,7 @@ try {
   await expectText(page, "1/1 must-haves", "requirement counted as done");
   await shot(page, "challenge-progress");
 
-  console.log("11. Remaining screens");
+  console.log("12. Remaining screens");
   for (const [path, name, marker] of [
     ["/challenges", "challenges", "Event ingestion service"],
     ["/drafts", "drafts", "has no ability to send"],

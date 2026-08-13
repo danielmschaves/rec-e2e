@@ -20,7 +20,7 @@ export async function syncCalendar(
 ): Promise<SyncResult> {
   const backfillDays = options.backfillDays ?? 30;
   const lookaheadDays = options.lookaheadDays ?? 90;
-  const result: SyncResult = { seen: 0, linked: 0, rulesFired: 0 };
+  const result: SyncResult = { seen: 0, linked: 0, rulesFired: 0, detected: 0 };
 
   const auth = await clientForAccount(account);
   const calendar = calendarFor(auth);

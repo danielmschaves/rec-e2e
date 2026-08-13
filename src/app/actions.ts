@@ -268,6 +268,48 @@ export async function addNoteAction(formData: FormData) {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-detected processes
+//
+// A detected row is live immediately — the point is that applying is the only
+// manual step. These two actions just clear the "is this right?" banner, or
+// remove a bad guess.
+// ---------------------------------------------------------------------------
+
+export async function confirmDetectionAction(formData: FormData) {
+  const opportunityId = String(formData.get("opportunityId"));
+  const roleTitle = String(formData.get("roleTitle") ?? "").trim();
+  const { opportunity } = await ownedOpportunity(opportunityId);
+
+  await prisma.opportunity.update({
+    where: { id: opportunity.id },
+    data: {
+      confirmedAt: new Date(),
+      roleTitle: roleTitle || undefined,
+      // Clear the "check the role title" prompt the detector may have left.
+      nextAction:
+        opportunity.nextAction?.startsWith("Check the role title") ?? false
+          ? null
+          : undefined,
+    },
+  });
+
+  refresh(opportunityId);
+}
+
+export async function dismissDetectionAction(formData: FormData) {
+  const opportunityId = String(formData.get("opportunityId"));
+  const { opportunity } = await ownedOpportunity(opportunityId);
+
+  // Only ever removes something the scanner created, never something you typed.
+  if (!opportunity.autoDetected || opportunity.confirmedAt) return;
+  await prisma.opportunity.delete({ where: { id: opportunity.id } });
+
+  revalidatePath("/processes");
+  revalidatePath("/");
+  redirect("/processes");
+}
+
+// ---------------------------------------------------------------------------
 // Challenges
 // ---------------------------------------------------------------------------
 

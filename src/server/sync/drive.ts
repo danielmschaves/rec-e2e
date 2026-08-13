@@ -62,7 +62,7 @@ export async function syncDrive(
   options: { maxFiles?: number } = {},
 ): Promise<SyncResult> {
   const maxFiles = options.maxFiles ?? 200;
-  const result: SyncResult = { seen: 0, linked: 0, rulesFired: 0 };
+  const result: SyncResult = { seen: 0, linked: 0, rulesFired: 0, detected: 0 };
 
   const auth = await clientForAccount(account);
   const drive = driveFor(auth);

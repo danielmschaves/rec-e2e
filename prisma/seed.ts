@@ -286,6 +286,54 @@ async function main() {
     }
   }
 
+  // --- one process the inbox scanner picked up on its own -------------------
+  // Shows the "we found this, is it right?" path without needing a live inbox.
+  const detectedName = "Halcyon Systems";
+  const detectedCompany = await prisma.company.upsert({
+    where: { userId_name: { userId: user.id, name: detectedName } },
+    // No domain: the confirmation came via LinkedIn, and linkedin.com is a
+    // relay — writing it here would match every future LinkedIn mail to them.
+    create: { userId: user.id, name: detectedName, domains: [] },
+    update: {},
+  });
+
+  const alreadyDetected = await prisma.opportunity.findUnique({
+    where: {
+      userId_companyId_roleTitle: {
+        userId: user.id,
+        companyId: detectedCompany.id,
+        roleTitle: "Senior Platform Engineer",
+      },
+    },
+  });
+
+  if (!alreadyDetected) {
+    const opportunity = await createOpportunity({
+      userId: user.id,
+      companyId: detectedCompany.id,
+      templateId: standard.id,
+      roleTitle: "Senior Platform Engineer",
+      actor: { type: "SYNC" },
+      details: { source: "LinkedIn", priority: "MEDIUM" },
+    });
+
+    await prisma.opportunity.update({
+      where: { id: opportunity.id },
+      data: {
+        autoDetected: true,
+        detectedFrom: "LinkedIn",
+        detectionEmailId: "seed-linkedin-confirmation",
+      },
+    });
+
+    await moveToStage({
+      opportunityId: opportunity.id,
+      target: { stageKey: "applied" },
+      actor: { type: "SYNC" },
+      reason: "Application confirmed by LinkedIn",
+    });
+  }
+
   // --- a technical challenge in flight --------------------------------------
   const nimbus = created["Nimbus Data"];
   if (nimbus) {

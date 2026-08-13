@@ -257,6 +257,17 @@ model Opportunity {
   emailThreadId String?
   driveFolderId String?
 
+  /// Set when the inbox scanner created this from an application confirmation
+  /// rather than you typing it in. Auto-detected rows are live immediately —
+  /// this only drives the "we picked this up, is it right?" banner.
+  autoDetected     Boolean   @default(false)
+  /// Which system the confirmation came from: "LinkedIn", "Greenhouse", …
+  detectedFrom     String?
+  /// Gmail id of the confirmation, so the guess is always traceable.
+  detectionEmailId String?
+  /// Set once you confirm or correct an auto-detected row.
+  confirmedAt      DateTime?
+
   appliedAt      DateTime  @default(now())
   lastActivityAt DateTime  @default(now())
   closedAt       DateTime?
